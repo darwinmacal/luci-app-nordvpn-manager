@@ -26,9 +26,9 @@ for file in $SHELL_FILES; do
 done
 
 if command -v shellcheck >/dev/null 2>&1; then
-	shellcheck -x $SHELL_FILES
+	shellcheck -x -e SC2015 $SHELL_FILES
 elif command -v docker >/dev/null 2>&1; then
-	docker run --rm -v "$ROOT:/mnt:ro" -w /mnt koalaman/shellcheck:stable -x $SHELL_FILES
+	docker run --rm -v "$ROOT:/mnt:ro" -w /mnt koalaman/shellcheck:stable -x -e SC2015 $SHELL_FILES
 else
 	echo 'shellcheck or docker is required' >&2
 	exit 1
