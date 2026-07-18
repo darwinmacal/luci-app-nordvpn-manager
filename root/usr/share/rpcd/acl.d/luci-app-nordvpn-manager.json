@@ -1,0 +1,33 @@
+{
+	"luci-app-nordvpn-manager": {
+		"description": "Grant access to the unofficial NordVPN WireGuard manager",
+		"read": {
+			"ubus": {
+				"luci.nordvpn_manager": [
+					"status",
+					"preflight",
+					"account_status",
+					"locations",
+					"recommendations"
+				]
+			}
+		},
+		"write": {
+			"ubus": {
+				"luci.nordvpn_manager": [
+					"configure",
+					"enroll",
+					"refresh_credentials",
+					"unlink",
+					"connect_server",
+					"connect_recommended",
+					"disconnect",
+					"reconnect",
+					"set_favorite",
+					"set_killswitch",
+					"reset_configuration"
+				]
+			}
+		}
+	}
+}

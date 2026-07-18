@@ -1,0 +1,13 @@
+{
+	"admin/services/nordvpn-manager": {
+		"title": "NordVPN Manager",
+		"order": 95,
+		"action": {
+			"type": "view",
+			"path": "nordvpn-manager/overview"
+		},
+		"depends": {
+			"acl": [ "luci-app-nordvpn-manager" ]
+		}
+	}
+}

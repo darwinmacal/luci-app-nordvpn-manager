@@ -1,0 +1,24 @@
+#!/bin/sh
+
+CONFIG='nordvpn_manager'
+SECTION='main'
+
+if [ -f "/etc/config/$CONFIG" ]; then
+	enabled="$(uci -q get "$CONFIG.$SECTION.enabled" 2>/dev/null || echo 0)"
+	if ! uci -q get "$CONFIG.$SECTION.desired_enabled" >/dev/null 2>&1; then
+		uci set "$CONFIG.$SECTION.desired_enabled=$enabled"
+		uci commit "$CONFIG"
+	fi
+	chmod 600 "/etc/config/$CONFIG"
+fi
+
+mkdir -p /etc/nordvpn-manager/credentials /tmp/nordvpn-manager-api /tmp/nordvpn-manager-health
+chown root:root /etc/nordvpn-manager /etc/nordvpn-manager/credentials \
+	/tmp/nordvpn-manager-api /tmp/nordvpn-manager-health
+chmod 700 /etc/nordvpn-manager /etc/nordvpn-manager/credentials \
+	/tmp/nordvpn-manager-api /tmp/nordvpn-manager-health
+
+/etc/init.d/nordvpn-manager enable >/dev/null 2>&1 || true
+/etc/init.d/nordvpn-manager restart >/dev/null 2>&1 || true
+
+exit 0

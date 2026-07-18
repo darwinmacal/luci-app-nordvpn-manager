@@ -1,0 +1,37 @@
+#!/bin/sh
+
+quiet='0'
+[ "${1:-}" = '-q' ] && { quiet='1'; shift; }
+command="${1:-}"
+[ $# -gt 0 ] && shift
+
+case "$command" in
+	show)
+		[ "${1:-}" = 'firewall' ] || exit 1
+		printf '%s\n' \
+			"firewall.lan=zone" \
+			"firewall.lan.name='lan'" \
+			"firewall.lan.network='lan vpnlan'" \
+			"firewall.wan=zone" \
+			"firewall.wan.name='wan'" \
+			"firewall.wan.network='wan'"
+		;;
+	get)
+		case "${1:-}" in
+			network.wan|network.vpnlan|network.lan) echo interface ;;
+			network.wan.proto) echo dhcp ;;
+			network.vpnlan.proto|network.lan.proto) echo static ;;
+			network.vpnlan.ipaddr) echo 172.20.20.1 ;;
+			network.vpnlan.netmask) echo 255.255.255.0 ;;
+			network.vpnlan.ip6assign) [ -e /tmp/mock-ipv6 ] && echo 64 || exit 1 ;;
+			network.vpnlan.ip6addr) exit 1 ;;
+			firewall.lan.name) echo lan ;;
+			firewall.lan.network) echo 'lan vpnlan' ;;
+			firewall.wan.name) echo wan ;;
+			firewall.wan.network) echo wan ;;
+			nordvpn_manager.main.configured|nordvpn_manager.main.enabled|nordvpn_manager.main.desired_enabled) echo 0 ;;
+			*) [ "$quiet" = '1' ] && exit 1; exit 1 ;;
+		esac
+		;;
+	*) exit 1 ;;
+esac

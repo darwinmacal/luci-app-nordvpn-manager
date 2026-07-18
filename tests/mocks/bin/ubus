@@ -1,0 +1,11 @@
+#!/bin/sh
+
+case "$*" in
+	'call network.interface.vpnlan status')
+		printf '%s\n' '{"up":true,"ipv6-address":[]}'
+		;;
+	'call network.interface.wan status')
+		printf '%s\n' '{"up":true,"l3_device":"eth0","route":[{"target":"0.0.0.0","nexthop":"198.51.100.1"}]}'
+		;;
+	*) exit 1 ;;
+esac

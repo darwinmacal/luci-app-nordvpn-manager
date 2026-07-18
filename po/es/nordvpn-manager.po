@@ -1,0 +1,415 @@
+msgid ""
+msgstr ""
+"Project-Id-Version: luci-app-nordvpn-manager 0.1.0\n"
+"PO-Revision-Date: 2026-07-18 00:00-0600\n"
+"Last-Translator: NordVPN Manager contributors\n"
+"Language-Team: Spanish\n"
+"Language: es\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=UTF-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+
+msgid "Connected"
+msgstr "Conectado"
+
+msgid "Fallback WAN"
+msgstr "Respaldo WAN"
+
+msgid "Reconnecting"
+msgstr "Reconectando"
+
+msgid "Direct Internet"
+msgstr "Internet directo"
+
+msgid "Blocked"
+msgstr "Bloqueado"
+
+msgid "Standard"
+msgstr "Estándar"
+
+msgid "P2P"
+msgstr "P2P"
+
+msgid "Double VPN"
+msgstr "VPN doble"
+
+msgid "Onion over VPN"
+msgstr "Onion sobre VPN"
+
+msgid "%s/s"
+msgstr "%s/s"
+
+msgid "%ds"
+msgstr "%ds"
+
+msgid "%dm %ds"
+msgstr "%dm %ds"
+
+msgid "%dh %dm"
+msgstr "%dh %dm"
+
+msgid "The operation could not be completed"
+msgstr "No se pudo completar la operación"
+
+msgid "Unable to load NordVPN servers"
+msgstr "No se pudieron cargar los servidores de NordVPN"
+
+msgid "Select a server first"
+msgstr "Selecciona primero un servidor"
+
+msgid "VPN reconnected"
+msgstr "VPN reconectada"
+
+msgid "VPN connected"
+msgstr "VPN conectada"
+
+msgid "Recommended server connected"
+msgstr "Servidor recomendado conectado"
+
+msgid "Disconnect NordVPN"
+msgstr "Desconectar NordVPN"
+
+msgid "The protected network will remain blocked until the VPN reconnects."
+msgstr "La red protegida permanecerá bloqueada hasta que la VPN vuelva a conectarse."
+
+msgid "The protected network will use the direct ISP connection."
+msgstr "La red protegida usará la conexión directa del proveedor de Internet."
+
+msgid "Cancel"
+msgstr "Cancelar"
+
+msgid "VPN disconnected"
+msgstr "VPN desconectada"
+
+msgid "Disconnect"
+msgstr "Desconectar"
+
+msgid "Kill switch enabled"
+msgstr "Kill switch activado"
+
+msgid "Disable kill switch"
+msgstr "Desactivar kill switch"
+
+msgid "If WireGuard stops, the protected network may access the Internet directly through your ISP."
+msgstr "Si WireGuard se detiene, la red protegida podrá acceder directamente a Internet mediante tu proveedor."
+
+msgid "Keep enabled"
+msgstr "Mantener activado"
+
+msgid "Kill switch disabled"
+msgstr "Kill switch desactivado"
+
+msgid "Disable"
+msgstr "Desactivar"
+
+msgid "Open LuCI over HTTPS before entering a NordVPN token"
+msgstr "Abre LuCI mediante HTTPS antes de ingresar un token de NordVPN"
+
+msgid "64-character access token"
+msgstr "Token de acceso de 64 caracteres"
+
+msgid "Link NordVPN account"
+msgstr "Vincular cuenta de NordVPN"
+
+msgid "Use a token generated in Nord Account."
+msgstr "Usa un token generado en Nord Account."
+
+msgid "Generate token"
+msgstr "Generar token"
+
+msgid "The token must contain 64 hexadecimal characters"
+msgstr "El token debe contener 64 caracteres hexadecimales"
+
+msgid "NordVPN account linked"
+msgstr "Cuenta de NordVPN vinculada"
+
+msgid "Link account"
+msgstr "Vincular cuenta"
+
+msgid "Unlink NordVPN account"
+msgstr "Desvincular cuenta de NordVPN"
+
+msgid "The VPN will disconnect and the stored token and NordLynx key will be removed."
+msgstr "La VPN se desconectará y se eliminarán el token y la clave NordLynx guardados."
+
+msgid "NordVPN account unlinked"
+msgstr "Cuenta de NordVPN desvinculada"
+
+msgid "Unlink"
+msgstr "Desvincular"
+
+msgid "Unable to update favorites"
+msgstr "No se pudieron actualizar los favoritos"
+
+msgid "All countries"
+msgstr "Todos los países"
+
+msgid "All cities"
+msgstr "Todas las ciudades"
+
+msgid "Any city"
+msgstr "Cualquier ciudad"
+
+msgid "Loading available servers..."
+msgstr "Cargando servidores disponibles..."
+
+msgid "Searching"
+msgstr "Buscando"
+
+msgid "%d servers"
+msgstr "%d servidores"
+
+msgid "No compatible servers match this filter."
+msgstr "Ningún servidor compatible coincide con este filtro."
+
+msgid "Choose a location to load servers."
+msgstr "Elige una ubicación para cargar servidores."
+
+msgid "Unknown location"
+msgstr "Ubicación desconocida"
+
+msgid "%d%% load"
+msgstr "%d%% de carga"
+
+msgid "Active"
+msgstr "Activo"
+
+msgid "Remove from favorites"
+msgstr "Quitar de favoritos"
+
+msgid "Add to favorites"
+msgstr "Agregar a favoritos"
+
+msgid "Waiting"
+msgstr "En espera"
+
+msgid "Working"
+msgstr "Procesando"
+
+msgid "No server selected"
+msgstr "Ningún servidor seleccionado"
+
+msgid "Enabled"
+msgstr "Activado"
+
+msgid "Disabled"
+msgstr "Desactivado"
+
+msgid "Linked"
+msgstr "Vinculada"
+
+msgid "Not linked"
+msgstr "Sin vincular"
+
+msgid "NordLynx key %s"
+msgstr "Clave NordLynx %s"
+
+msgid "Token required"
+msgstr "Token requerido"
+
+msgid "%s ago"
+msgstr "hace %s"
+
+msgid "No handshake"
+msgstr "Sin handshake"
+
+msgid "Protected LAN"
+msgstr "LAN protegida"
+
+msgid "Encrypted"
+msgstr "Cifrado"
+
+msgid "Unavailable"
+msgstr "No disponible"
+
+msgid "System DNS"
+msgstr "DNS del sistema"
+
+msgid "WireGuard"
+msgstr "WireGuard"
+
+msgid "Offline"
+msgstr "Sin conexión"
+
+msgid "Next server change in %s"
+msgstr "Próximo cambio de servidor en %s"
+
+msgid "%d of %d server changes available"
+msgstr "%d de %d cambios de servidor disponibles"
+
+msgid "Reconnect"
+msgstr "Reconectar"
+
+msgid "Connect"
+msgstr "Conectar"
+
+msgid "Custom"
+msgstr "Personalizado"
+
+msgid "DoH URL"
+msgstr "URL DoH"
+
+msgid "Bootstrap DNS"
+msgstr "DNS de arranque"
+
+msgid "Select two different logical networks"
+msgstr "Selecciona dos redes lógicas diferentes"
+
+msgid "Configuring"
+msgstr "Configurando"
+
+msgid "Network preflight failed"
+msgstr "Falló la validación previa de la red"
+
+msgid "Unable to save the configuration"
+msgstr "No se pudo guardar la configuración"
+
+msgid "NordVPN Manager configured"
+msgstr "NordVPN Manager configurado"
+
+msgid "Save changes"
+msgstr "Guardar cambios"
+
+msgid "Configure manager"
+msgstr "Configurar administrador"
+
+msgid "WAN logical network"
+msgstr "Red lógica WAN"
+
+msgid "Protected logical network"
+msgstr "Red lógica protegida"
+
+msgid "WireGuard MTU"
+msgstr "MTU de WireGuard"
+
+msgid "Encrypted DNS"
+msgstr "DNS cifrado"
+
+msgid "DNS provider"
+msgstr "Proveedor DNS"
+
+msgid "Kill switch by default"
+msgstr "Kill switch predeterminado"
+
+msgid "Reset NordVPN Manager"
+msgstr "Restablecer NordVPN Manager"
+
+msgid "Managed firewall, PBR, DNS and WireGuard sections will be removed. Account credentials will also be deleted."
+msgstr "Se eliminarán las secciones administradas de firewall, PBR, DNS y WireGuard. También se borrarán las credenciales de la cuenta."
+
+msgid "NordVPN Manager reset"
+msgstr "NordVPN Manager restablecido"
+
+msgid "Reset"
+msgstr "Restablecer"
+
+msgid "Initial setup"
+msgstr "Configuración inicial"
+
+msgid "Choose the logical networks this manager will use."
+msgstr "Elige las redes lógicas que usará este administrador."
+
+msgid "Kill switch"
+msgstr "Kill switch"
+
+msgid "Connection status"
+msgstr "Estado de conexión"
+
+msgid "Checking"
+msgstr "Comprobando"
+
+msgid "Traffic path"
+msgstr "Ruta del tráfico"
+
+msgid "DNS"
+msgstr "DNS"
+
+msgid "Tunnel"
+msgstr "Túnel"
+
+msgid "Internet"
+msgstr "Internet"
+
+msgid "Tunnel details"
+msgstr "Detalles del túnel"
+
+msgid "Server"
+msgstr "Servidor"
+
+msgid "Location"
+msgstr "Ubicación"
+
+msgid "Endpoint"
+msgstr "Endpoint"
+
+msgid "Handshake"
+msgstr "Handshake"
+
+msgid "Received"
+msgstr "Recibido"
+
+msgid "Sent"
+msgstr "Enviado"
+
+msgid "Download"
+msgstr "Descarga"
+
+msgid "Upload"
+msgstr "Subida"
+
+msgid "NordVPN account"
+msgstr "Cuenta de NordVPN"
+
+msgid "NordLynx credentials refreshed"
+msgstr "Credenciales NordLynx renovadas"
+
+msgid "Refresh credentials"
+msgstr "Renovar credenciales"
+
+msgid "NordVPN catalog"
+msgstr "Catálogo de NordVPN"
+
+msgid "Choose a server"
+msgstr "Elegir un servidor"
+
+msgid "Country"
+msgstr "País"
+
+msgid "City"
+msgstr "Ciudad"
+
+msgid "Category"
+msgstr "Categoría"
+
+msgid "Favorites"
+msgstr "Favoritos"
+
+msgid "Checking server change limit"
+msgstr "Comprobando el límite de cambios"
+
+msgid "Refresh"
+msgstr "Actualizar"
+
+msgid "Connect fastest"
+msgstr "Conectar al más rápido"
+
+msgid "Load"
+msgstr "Carga"
+
+msgid "Manager"
+msgstr "Administrador"
+
+msgid "Configuration"
+msgstr "Configuración"
+
+msgid "Edit"
+msgstr "Editar"
+
+msgid "Services / VPN"
+msgstr "Servicios / VPN"
+
+msgid "NordVPN Manager"
+msgstr "NordVPN Manager"
+
+msgid "Unofficial integration"
+msgstr "Integración no oficial"

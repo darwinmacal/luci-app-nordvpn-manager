@@ -1,0 +1,111 @@
+#!/bin/ash
+# shellcheck shell=dash
+
+set -eu
+
+PATH='/usr/sbin:/usr/bin:/sbin:/bin'
+CONFIG='nordvpn_manager'
+SECTION='main'
+CONTROLLER='/usr/libexec/nordvpn-manager'
+STATE_DIR='/tmp/nordvpn-manager-health'
+FAILURES="$STATE_DIR/failures"
+LAST_ATTEMPT="$STATE_DIR/last-attempt"
+
+cfg() {
+	local option="$1"
+	local fallback="${2:-}"
+	local value
+
+	value="$(uci -q get "$CONFIG.$SECTION.$option" 2>/dev/null || true)"
+	[ -n "$value" ] && printf '%s\n' "$value" || printf '%s\n' "$fallback"
+}
+
+valid_number() {
+	printf '%s' "$1" | grep -Eq '^[0-9]+$'
+}
+
+read_number() {
+	local path="$1"
+	local fallback="$2"
+	local value=''
+
+	[ -r "$path" ] && IFS= read -r value < "$path" || true
+	valid_number "$value" && printf '%s\n' "$value" || printf '%s\n' "$fallback"
+}
+
+write_number() {
+	local path="$1"
+	local value="$2"
+	local tmp="${path}.tmp.$$"
+
+	(umask 077; printf '%s\n' "$value" > "$tmp")
+	mv "$tmp" "$path"
+}
+
+status_value() {
+	local path="$1"
+	local key="$2"
+
+	sed -n "s/^${key}=//p" "$path" | head -n1
+}
+
+mkdir -p "$STATE_DIR"
+chmod 700 "$STATE_DIR"
+[ -f "$FAILURES" ] || write_number "$FAILURES" '0'
+[ -f "$LAST_ATTEMPT" ] || write_number "$LAST_ATTEMPT" '0'
+
+sleep 10
+while :; do
+	interval="$(cfg health_interval 30)"
+	threshold="$(cfg health_failures 3)"
+	cooldown="$(cfg reconnect_cooldown 120)"
+	valid_number "$interval" && [ "$interval" -ge 10 ] || interval='30'
+	valid_number "$threshold" && [ "$threshold" -ge 1 ] || threshold='3'
+	valid_number "$cooldown" && [ "$cooldown" -ge 30 ] || cooldown='120'
+
+	status="${STATE_DIR}/status.$$"
+	if "$CONTROLLER" status > "$status" 2>/dev/null; then
+		configured="$(status_value "$status" configured)"
+		desired="$(status_value "$status" desired_enabled)"
+		connected="$(status_value "$status" connected)"
+		pbr="$(status_value "$status" pbr_running)"
+		dns_mode="$(status_value "$status" dns_mode)"
+		dns="$(status_value "$status" dns_running)"
+	else
+		configured='0'
+		desired='0'
+		connected='0'
+		pbr='0'
+		dns_mode='encrypted'
+		dns='0'
+	fi
+	rm -f "$status"
+
+	if [ "$configured" != '1' ] || [ "$desired" != '1' ]; then
+		write_number "$FAILURES" '0'
+	elif [ "$connected" = '1' ] && [ "$pbr" = '1' ] && \
+		{ [ "$dns_mode" != 'encrypted' ] || [ "$dns" = '1' ]; }; then
+		write_number "$FAILURES" '0'
+	else
+		failures="$(read_number "$FAILURES" 0)"
+		failures=$((failures + 1))
+		write_number "$FAILURES" "$failures"
+		"$CONTROLLER" reconcile >/dev/null 2>&1 || true
+
+		if [ "$(cfg auto_reconnect 1)" = '1' ] && [ "$failures" -ge "$threshold" ]; then
+			now="$(date +%s)"
+			last="$(read_number "$LAST_ATTEMPT" 0)"
+			if [ $((now - last)) -ge "$cooldown" ]; then
+				write_number "$LAST_ATTEMPT" "$now"
+				logger -t nordvpn-manager 'WireGuard health check failed; attempting recovery'
+				if "$CONTROLLER" auto-reconnect >/dev/null 2>&1; then
+					write_number "$FAILURES" '0'
+					logger -t nordvpn-manager 'WireGuard recovery succeeded'
+				else
+					logger -t nordvpn-manager 'WireGuard recovery failed; fallback policy remains active'
+				fi
+			fi
+		fi
+	fi
+	sleep "$interval"
+done

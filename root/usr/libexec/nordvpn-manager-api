@@ -1,0 +1,261 @@
+#!/bin/ash
+# shellcheck shell=dash
+
+set -eu
+
+API_BASE='https://api.nordvpn.com/v1'
+STATE_DIR='/etc/nordvpn-manager'
+CREDENTIAL_DIR="$STATE_DIR/credentials"
+TOKEN_FILE="$CREDENTIAL_DIR/token"
+KEY_FILE="$CREDENTIAL_DIR/nordlynx.key"
+STATUS_FILE="$CREDENTIAL_DIR/status"
+CACHE_DIR='/tmp/nordvpn-manager-api'
+WIREGUARD_TECH_ID='35'
+RECOMMENDATION_LIMIT='20'
+LOCATION_TTL='21600'
+RECOMMENDATION_TTL='60'
+
+die() {
+	printf '%s\n' "$*" >&2
+	exit 1
+}
+
+valid_token() {
+	[ "${#1}" -eq 64 ] && printf '%s' "$1" | grep -Eq '^[0-9A-Fa-f]{64}$'
+}
+
+valid_key() {
+	[ "${#1}" -eq 44 ] && printf '%s' "$1" | grep -Eq '^[A-Za-z0-9+/]{43}=$'
+}
+
+valid_number() {
+	printf '%s' "$1" | grep -Eq '^[0-9]+$'
+}
+
+ensure_dirs() {
+	mkdir -p "$CREDENTIAL_DIR" "$CACHE_DIR"
+	chown root:root "$STATE_DIR" "$CREDENTIAL_DIR" "$CACHE_DIR"
+	chmod 700 "$STATE_DIR" "$CREDENTIAL_DIR" "$CACHE_DIR"
+}
+
+atomic_secret() {
+	local path="$1"
+	local value="$2"
+	local tmp="${path}.tmp.$$"
+
+	(umask 077; printf '%s\n' "$value" > "$tmp")
+	chown root:root "$tmp"
+	chmod 600 "$tmp"
+	mv "$tmp" "$path"
+}
+
+write_status() {
+	local enrolled_at="$1"
+	local tmp="${STATUS_FILE}.tmp.$$"
+
+	(umask 077; {
+		printf 'source=token\n'
+		printf 'enrolled_at=%s\n' "$enrolled_at"
+	} > "$tmp")
+	chown root:root "$tmp"
+	chmod 600 "$tmp"
+	mv "$tmp" "$STATUS_FILE"
+}
+
+status_value() {
+	local key="$1"
+	[ -r "$STATUS_FILE" ] || return 0
+	sed -n "s/^${key}=//p" "$STATUS_FILE" | head -n 1
+}
+
+key_fingerprint() {
+	local key="$1"
+	local public
+
+	public="$(printf '%s\n' "$key" | wg pubkey 2>/dev/null || true)"
+	[ -n "$public" ] || return 1
+	printf '%s' "$public" | sha256sum | cut -c1-12
+}
+
+credential_request() {
+	local token="$1"
+	local response key fingerprint now
+
+	valid_token "$token" || die 'The token must contain exactly 64 hexadecimal characters'
+	response="$(mktemp /tmp/nordvpn-manager-credentials.XXXXXX)"
+	chmod 600 "$response"
+
+	if ! {
+		printf 'url = "%s/users/services/credentials"\n' "$API_BASE"
+		printf 'user = "token:%s"\n' "$token"
+		printf 'silent\nshow-error\nfail-with-body\ncompressed\n'
+		printf 'proto = "=https"\ntlsv1.2\nconnect-timeout = 8\nmax-time = 25\n'
+	} | curl --config - --output "$response"; then
+		rm -f "$response"
+		die 'NordVPN rejected the token or the account service is unavailable'
+	fi
+
+	key="$(jsonfilter -i "$response" -e '@.nordlynx_private_key' 2>/dev/null || true)"
+	rm -f "$response"
+	valid_key "$key" || die 'NordVPN did not return a valid NordLynx key'
+	fingerprint="$(key_fingerprint "$key")" || die 'Unable to validate the NordLynx identity'
+	now="$(date +%s)"
+	atomic_secret "$KEY_FILE" "$key"
+	write_status "$now"
+	printf '{"ok":true,"enrolled_at":%s,"fingerprint":"%s"}\n' "$now" "$fingerprint"
+}
+
+enroll() {
+	local input="$1"
+	local token=''
+
+	[ -r "$input" ] || die 'Unable to read the token input'
+	IFS= read -r token < "$input" || true
+	valid_token "$token" || die 'The token must contain exactly 64 hexadecimal characters'
+	credential_request "$token"
+	atomic_secret "$TOKEN_FILE" "$token"
+	unset token
+}
+
+refresh_credentials() {
+	local token=''
+
+	[ -r "$TOKEN_FILE" ] || die 'No persistent token is enrolled'
+	IFS= read -r token < "$TOKEN_FILE" || true
+	credential_request "$token"
+	unset token
+}
+
+status() {
+	local token_present='false' key_present='false' fingerprint='' source enrolled_at
+	local key=''
+
+	[ -s "$TOKEN_FILE" ] && token_present='true'
+	if [ -r "$KEY_FILE" ]; then
+		IFS= read -r key < "$KEY_FILE" || true
+		if valid_key "$key"; then
+			key_present='true'
+			fingerprint="$(key_fingerprint "$key" 2>/dev/null || true)"
+		fi
+	fi
+	source="$(status_value source)"
+	enrolled_at="$(status_value enrolled_at)"
+	valid_number "${enrolled_at:-}" || enrolled_at='0'
+	printf '{"ok":true,"token_present":%s,"key_present":%s,"source":"%s","enrolled_at":%s,"fingerprint":"%s"}\n' \
+		"$token_present" "$key_present" "${source:-none}" "$enrolled_at" "$fingerprint"
+}
+
+purge() {
+	rm -f "$TOKEN_FILE" "$KEY_FILE" "$STATUS_FILE"
+	printf '{"ok":true}\n'
+}
+
+cache_is_fresh() {
+	local path="$1"
+	local ttl="$2"
+	local now mtime
+
+	[ -s "$path" ] || return 1
+	now="$(date +%s)"
+	mtime="$(date -r "$path" +%s 2>/dev/null || echo 0)"
+	valid_number "$mtime" || return 1
+	[ $((now - mtime)) -ge 0 ] && [ $((now - mtime)) -lt "$ttl" ]
+}
+
+fetch_public() {
+	local cache_name="$1"
+	local ttl="$2"
+	local force="$3"
+	local url="$4"
+	local cache="$CACHE_DIR/$cache_name.json"
+	local tmp="$cache.tmp.$$"
+
+	if [ "$force" != '1' ] && cache_is_fresh "$cache" "$ttl"; then
+		cat "$cache"
+		return 0
+	fi
+
+	if curl --globoff --silent --show-error --fail --compressed \
+		--proto '=https' --tlsv1.2 --connect-timeout 8 --max-time 25 \
+		--retry 2 --retry-delay 1 --retry-max-time 45 \
+		--output "$tmp" "$url" && [ -s "$tmp" ]; then
+		chmod 600 "$tmp"
+		mv "$tmp" "$cache"
+		cat "$cache"
+		return 0
+	fi
+
+	rm -f "$tmp"
+	if [ -s "$cache" ]; then
+		cat "$cache"
+		return 0
+	fi
+	die 'The NordVPN API is unavailable and no cache is present'
+}
+
+countries() {
+	local force="${1:-0}"
+	case "$force" in 0|1) ;; *) die 'Invalid refresh flag' ;; esac
+	fetch_public countries "$LOCATION_TTL" "$force" "$API_BASE/servers/countries"
+}
+
+groups() {
+	local force="${1:-0}"
+	case "$force" in 0|1) ;; *) die 'Invalid refresh flag' ;; esac
+	fetch_public groups "$LOCATION_TTL" "$force" "$API_BASE/servers/groups"
+}
+
+recommendations() {
+	local scope="${1:-global}"
+	local location_id="${2:-0}"
+	local group_id="${3:-0}"
+	local force="${4:-0}"
+	local query cache_name
+
+	case "$scope" in global|country|city) ;; *) die 'Invalid recommendation scope' ;; esac
+	case "$force" in 0|1) ;; *) die 'Invalid refresh flag' ;; esac
+	valid_number "$location_id" || die 'Invalid location id'
+	valid_number "$group_id" || die 'Invalid server group id'
+	[ "$scope" = 'global' ] || [ "$location_id" -gt 0 ] || die 'Missing location id'
+
+	query="limit=$RECOMMENDATION_LIMIT&filters[servers.status]=online&filters[servers_technologies]=$WIREGUARD_TECH_ID&filters[servers_technologies][pivot][status]=online"
+	case "$scope" in
+		country) query="$query&filters[country_id]=$location_id" ;;
+		city) query="$query&filters[country_city_id]=$location_id" ;;
+	esac
+	[ "$group_id" -eq 0 ] || query="$query&filters[servers_groups]=$group_id"
+	cache_name="recommendations-${scope}-${location_id}-${group_id}"
+	fetch_public "$cache_name" "$RECOMMENDATION_TTL" "$force" \
+		"$API_BASE/servers/recommendations?$query"
+}
+
+server() {
+	local id="${1:-}"
+	local force="${2:-0}"
+	local query
+
+	valid_number "$id" || die 'Invalid server id'
+	[ "$id" -gt 0 ] || die 'Invalid server id'
+	case "$force" in 0|1) ;; *) die 'Invalid refresh flag' ;; esac
+	query="filters[servers.id]=$id&limit=1"
+	fetch_public "server-$id" "$RECOMMENDATION_TTL" "$force" "$API_BASE/servers?$query"
+}
+
+ensure_dirs
+
+case "${1:-}" in
+	enroll)
+		[ -n "${2:-}" ] || die 'Missing token input'
+		enroll "$2"
+		;;
+	refresh-credentials) refresh_credentials ;;
+	status) status ;;
+	purge) purge ;;
+	countries) countries "${2:-0}" ;;
+	groups) groups "${2:-0}" ;;
+	recommendations) recommendations "${2:-global}" "${3:-0}" "${4:-0}" "${5:-0}" ;;
+	server) server "${2:-}" "${3:-0}" ;;
+	*)
+		die "Usage: $0 enroll <fd>|refresh-credentials|status|purge|countries [force]|groups [force]|recommendations <scope> <location-id> <group-id> [force]|server <id> [force]"
+		;;
+esac

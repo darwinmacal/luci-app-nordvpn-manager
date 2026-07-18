@@ -1,0 +1,65 @@
+name: ci
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  validate-and-build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    env:
+      SDK_NAME: openwrt-sdk-25.12.5-mediatek-mt7622_gcc-14.3.0_musl.Linux-x86_64
+      SDK_SHA256: 0bd25a391256dbe9ad1f9c6f313364b1f9eddcc0e280c829d644034981ad8306
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Install validation tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes \
+            build-essential file gawk gettext git jq python3-setuptools \
+            ripgrep rsync shellcheck swig unzip zstd
+
+      - name: Run static and mock checks
+        run: ./tests/run.sh
+
+      - name: Download verified OpenWrt SDK
+        run: |
+          curl --fail --location --retry 3 --output "$RUNNER_TEMP/$SDK_NAME.tar.zst" \
+            "https://downloads.openwrt.org/releases/25.12.5/targets/mediatek/mt7622/$SDK_NAME.tar.zst"
+          echo "$SDK_SHA256  $RUNNER_TEMP/$SDK_NAME.tar.zst" | sha256sum --check --strict
+          tar --zstd -xf "$RUNNER_TEMP/$SDK_NAME.tar.zst" -C "$RUNNER_TEMP"
+
+      - name: Build APK
+        env:
+          NVM_JOBS: "2"
+          NVM_VERBOSE: "s"
+        run: ./scripts/build-sdk.sh "$RUNNER_TEMP/$SDK_NAME"
+
+      - name: Collect package
+        run: |
+          mkdir -p dist
+          find "$RUNNER_TEMP/$SDK_NAME/bin" -type f -name 'luci-app-nordvpn-manager-*.apk' \
+            -exec cp -v {} dist/ \;
+          test "$(find dist -type f -name '*.apk' | wc -l)" -eq 1
+          (cd dist && sha256sum *.apk > SHA256SUMS)
+
+      - name: Upload package
+        uses: actions/upload-artifact@v4
+        with:
+          name: luci-app-nordvpn-manager-openwrt-25.12
+          path: |
+            dist/*.apk
+            dist/SHA256SUMS
+          if-no-files-found: error
+          retention-days: 7

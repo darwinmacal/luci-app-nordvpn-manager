@@ -1,0 +1,15 @@
+#!/bin/sh
+
+[ "$ACTION" = 'ifup' ] || [ "$ACTION" = 'ifupdate' ] || exit 0
+[ -x /usr/libexec/nordvpn-manager ] || exit 0
+
+wan="$(uci -q get nordvpn_manager.main.wan_network 2>/dev/null || true)"
+[ -n "$wan" ] && [ "${INTERFACE:-}" = "$wan" ] || exit 0
+
+(
+	sleep 2
+	/usr/libexec/nordvpn-manager reconcile >/dev/null 2>&1 || \
+		logger -t nordvpn-manager 'Unable to reconcile the WAN fallback after an interface update'
+) &
+
+exit 0

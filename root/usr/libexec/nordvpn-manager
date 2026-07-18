@@ -1,0 +1,1331 @@
+#!/bin/ash
+# shellcheck shell=dash
+
+set -eu
+
+PATH='/usr/sbin:/usr/bin:/sbin:/bin'
+CONFIG='nordvpn_manager'
+SECTION='main'
+STATE_DIR='/etc/nordvpn-manager'
+CREDENTIAL_DIR="$STATE_DIR/credentials"
+KEY_FILE="$CREDENTIAL_DIR/nordlynx.key"
+ACTIVE_SERVER="$STATE_DIR/active-server"
+API='/usr/libexec/nordvpn-manager-api'
+LOCK_DIR='/var/lock/nordvpn-manager.lock'
+SWITCH_HISTORY='/tmp/nordvpn-manager-switches'
+PROFILE_CHANGE='/tmp/nordvpn-manager-change'
+FALLBACK_METRIC='42760'
+WG_ADDRESS='10.5.0.2/32'
+WG_SOURCE='10.5.0.2'
+TX_DIR=''
+TX_ACTIVE='0'
+LOCK_HELD='0'
+
+die() {
+	printf '%s\n' "$*" >&2
+	exit 1
+}
+
+cfg() {
+	local option="$1"
+	local fallback="${2:-}"
+	local value
+
+	value="$(uci -q get "$CONFIG.$SECTION.$option" 2>/dev/null || true)"
+	[ -n "$value" ] && printf '%s\n' "$value" || printf '%s\n' "$fallback"
+}
+
+valid_uci_name() {
+	printf '%s' "$1" | grep -Eq '^[A-Za-z][A-Za-z0-9_]{0,31}$'
+}
+
+valid_interface_name() {
+	printf '%s' "$1" | grep -Eq '^[A-Za-z][A-Za-z0-9_]{0,14}$'
+}
+
+valid_zone() {
+	printf '%s' "$1" | grep -Eq '^[A-Za-z][A-Za-z0-9_-]{0,31}$'
+}
+
+valid_number() {
+	printf '%s' "$1" | grep -Eq '^[0-9]+$'
+}
+
+valid_ipv4() {
+	printf '%s' "$1" | awk -F. '
+		NF != 4 { exit 1 }
+		{
+			for (i = 1; i <= 4; i++)
+				if ($i !~ /^[0-9]+$/ || $i < 0 || $i > 255)
+					exit 1
+		}'
+}
+
+valid_cidr() {
+	local address="${1%/*}"
+	local prefix="${1#*/}"
+
+	[ "$address" != "$prefix" ] || return 1
+	valid_ipv4 "$address" || return 1
+	valid_number "$prefix" && [ "$prefix" -ge 0 ] && [ "$prefix" -le 32 ]
+}
+
+valid_wireguard_key() {
+	[ "${#1}" -eq 44 ] && printf '%s' "$1" | grep -Eq '^[A-Za-z0-9+/]{43}=$'
+}
+
+acquire_lock() {
+	local owner=''
+
+	mkdir -p /var/lock
+	if ! mkdir "$LOCK_DIR" 2>/dev/null; then
+		[ -r "$LOCK_DIR/pid" ] && owner="$(cat "$LOCK_DIR/pid" 2>/dev/null || true)"
+		if valid_number "${owner:-0}" && [ "$owner" -gt 1 ] && ! kill -0 "$owner" 2>/dev/null; then
+			rm -f "$LOCK_DIR/pid"
+			rmdir "$LOCK_DIR" 2>/dev/null || true
+			mkdir "$LOCK_DIR" 2>/dev/null || die 'Another NordVPN Manager operation is running'
+		else
+			die 'Another NordVPN Manager operation is running'
+		fi
+	fi
+	printf '%s\n' "$$" > "$LOCK_DIR/pid"
+	LOCK_HELD='1'
+}
+
+release_lock() {
+	[ "$LOCK_HELD" = '1' ] || return 0
+	rm -f "$LOCK_DIR/pid"
+	rmdir "$LOCK_DIR" 2>/dev/null || true
+	LOCK_HELD='0'
+}
+
+begin_transaction() {
+	local package
+
+	TX_DIR="/tmp/nordvpn-manager-tx.$$"
+	mkdir -p "$TX_DIR"
+	for package in nordvpn_manager firewall pbr https-dns-proxy network; do
+		if [ -f "/etc/config/$package" ]; then
+			cp "/etc/config/$package" "$TX_DIR/$package"
+		else
+			: > "$TX_DIR/$package.missing"
+		fi
+	done
+	TX_ACTIVE='1'
+}
+
+rollback_transaction() {
+	local package
+
+	[ "$TX_ACTIVE" = '1' ] || return 0
+	for package in nordvpn_manager firewall pbr https-dns-proxy network; do
+		if [ -f "$TX_DIR/$package" ]; then
+			cp "$TX_DIR/$package" "/etc/config/$package"
+		elif [ -f "$TX_DIR/$package.missing" ]; then
+			rm -f "/etc/config/$package"
+		fi
+	done
+	/etc/init.d/firewall reload >/dev/null 2>&1 || true
+	/etc/init.d/pbr restart >/dev/null 2>&1 || true
+	/etc/init.d/https-dns-proxy restart >/dev/null 2>&1 || true
+	( apply_fallback_route "$(cfg killswitch_enabled 1)" ) >/dev/null 2>&1 || true
+}
+
+end_transaction() {
+	TX_ACTIVE='0'
+	if [ -n "$TX_DIR" ] && [ -d "$TX_DIR" ]; then
+		find "$TX_DIR" -type f -exec rm {} \;
+		rmdir "$TX_DIR" 2>/dev/null || true
+	fi
+	TX_DIR=''
+}
+
+on_exit() {
+	local rc="$?"
+
+	trap - EXIT INT TERM
+	if [ "$rc" -ne 0 ] && [ "$TX_ACTIVE" = '1' ]; then
+		printf '%s\n' 'Operation failed; restoring the previous configuration' >&2
+		rollback_transaction
+	fi
+	end_transaction
+	release_lock
+	exit "$rc"
+}
+
+trap on_exit EXIT
+trap 'exit 130' INT TERM
+
+zone_for_network() {
+	local network="$1"
+	local section name item networks
+
+	for section in $(uci -q show firewall | sed -n 's/^\(firewall\.[^=]*\)=zone$/\1/p'); do
+		name="$(uci -q get "$section.name" 2>/dev/null || true)"
+		networks="$(uci -q get "$section.network" 2>/dev/null || true)"
+		for item in $networks; do
+			[ "$item" = "$network" ] && {
+				printf '%s\n' "$name"
+				return 0
+			}
+		done
+	done
+	return 1
+}
+
+zone_section_by_name() {
+	local wanted="$1"
+	local section name
+
+	for section in $(uci -q show firewall | sed -n 's/^\(firewall\.[^=]*\)=zone$/\1/p'); do
+		name="$(uci -q get "$section.name" 2>/dev/null || true)"
+		[ "$name" = "$wanted" ] && {
+			printf '%s\n' "$section"
+			return 0
+		}
+	done
+	return 1
+}
+
+assert_owned_or_absent() {
+	local package="$1"
+	local section="$2"
+	local type owner
+
+	type="$(uci -q get "$package.$section" 2>/dev/null || true)"
+	[ -n "$type" ] || return 0
+	owner="$(uci -q get "$package.$section.nvm_owner" 2>/dev/null || true)"
+	[ "$owner" = '1' ] || die "$package.$section exists and is not owned by NordVPN Manager"
+}
+
+assert_managed_sections_available() {
+	local wg="$1"
+	local section
+
+	for section in nvm_vpn nvm_to_vpn nvm_block_wan nvm_allow_wan \
+		nvm_dns_redirect nvm_allow_dns nvm_block_external_dns; do
+		assert_owned_or_absent firewall "$section"
+	done
+	assert_owned_or_absent pbr nvm_protected
+	assert_owned_or_absent pbr nvm_dns
+	assert_owned_or_absent https-dns-proxy nordvpn_manager
+	assert_owned_or_absent network "$wg"
+	assert_owned_or_absent network "${wg}_peer"
+}
+
+network_has_ipv6() {
+	local network="$1"
+	local value status
+
+	value="$(uci -q get "network.$network.ip6addr" 2>/dev/null || true)"
+	[ -z "$value" ] || return 0
+	value="$(uci -q get "network.$network.ip6assign" 2>/dev/null || true)"
+	case "$value" in ''|0) ;; *) return 0 ;; esac
+	status="$(ubus call "network.interface.$network" status 2>/dev/null || true)"
+	[ -n "$status" ] || return 1
+	value="$(printf '%s' "$status" | jsonfilter -e '@["ipv6-address"][0].address' 2>/dev/null || true)"
+	[ -n "$value" ]
+}
+
+preflight_networks() {
+	local wan="$1"
+	local protected="$2"
+	local proto ip netmask calc source_zone wan_zone ipv6='0'
+
+	valid_uci_name "$wan" || die 'Invalid WAN network name'
+	valid_uci_name "$protected" || die 'Invalid protected network name'
+	[ "$wan" != "$protected" ] || die 'WAN and protected networks must be different'
+	uci -q get "network.$wan" >/dev/null 2>&1 || die 'The selected WAN network does not exist'
+	uci -q get "network.$protected" >/dev/null 2>&1 || die 'The protected network does not exist'
+
+	proto="$(uci -q get "network.$protected.proto" 2>/dev/null || true)"
+	[ "$proto" = 'static' ] || die 'The protected network must use a static IPv4 address'
+	ip="$(uci -q get "network.$protected.ipaddr" 2>/dev/null || true)"
+	ip="${ip%% *}"
+	netmask="$(uci -q get "network.$protected.netmask" 2>/dev/null || true)"
+	netmask="${netmask:-255.255.255.0}"
+	valid_ipv4 "$ip" || die 'The protected network has no valid IPv4 address'
+	valid_ipv4 "$netmask" || die 'The protected network has no valid netmask'
+
+	calc="$(ipcalc.sh "$ip" "$netmask" 2>/dev/null || true)"
+	PREFLIGHT_NETWORK="$(printf '%s\n' "$calc" | sed -n 's/^NETWORK=//p' | head -n1)"
+	PREFLIGHT_PREFIX="$(printf '%s\n' "$calc" | sed -n 's/^PREFIX=//p' | head -n1)"
+	valid_ipv4 "$PREFLIGHT_NETWORK" || die 'Unable to calculate the protected subnet'
+	valid_number "$PREFLIGHT_PREFIX" || die 'Unable to calculate the protected prefix'
+
+	source_zone="$(zone_for_network "$protected" || true)"
+	wan_zone="$(zone_for_network "$wan" || true)"
+	valid_zone "$source_zone" || die 'The protected network is not assigned to a firewall zone'
+	valid_zone "$wan_zone" || die 'The WAN network is not assigned to a firewall zone'
+	[ "$source_zone" != "$wan_zone" ] || die 'WAN and protected networks cannot share a firewall zone'
+	if network_has_ipv6 "$protected"; then
+		ipv6='1'
+		die 'IPv6 is active on the protected network; disable it before enabling this IPv4-only release'
+	fi
+
+	PREFLIGHT_IP="$ip"
+	PREFLIGHT_SUBNET="$PREFLIGHT_NETWORK/$PREFLIGHT_PREFIX"
+	PREFLIGHT_SOURCE_ZONE="$source_zone"
+	PREFLIGHT_WAN_ZONE="$wan_zone"
+	printf 'wan_network=%s\n' "$wan"
+	printf 'protected_network=%s\n' "$protected"
+	printf 'protected_ip=%s\n' "$PREFLIGHT_IP"
+	printf 'protected_subnet=%s\n' "$PREFLIGHT_SUBNET"
+	printf 'source_zone=%s\n' "$PREFLIGHT_SOURCE_ZONE"
+	printf 'wan_zone=%s\n' "$PREFLIGHT_WAN_ZONE"
+	printf 'ipv6=%s\n' "$ipv6"
+}
+
+set_rule_common() {
+	local section="$1"
+	local name="$2"
+
+	uci set "firewall.$section=rule"
+	uci set "firewall.$section.name=$name"
+	uci set "firewall.$section.nvm_owner=1"
+	uci set "firewall.$section.family=ipv4"
+}
+
+configure_firewall_base() {
+	local source_zone wan_zone vpn_zone wg subnet protected_ip dns_mode dns_port dns_enabled='0'
+
+	source_zone="$(cfg source_zone)"
+	wan_zone="$(cfg wan_zone)"
+	vpn_zone="$(cfg vpn_zone nordvpn)"
+	wg="$(cfg wg_interface wg_nord)"
+	subnet="$(cfg protected_subnet)"
+	protected_ip="$(cfg protected_ip)"
+	dns_mode="$(cfg dns_mode encrypted)"
+	dns_port="$(cfg dns_port 5053)"
+	[ "$dns_mode" = 'encrypted' ] && dns_enabled='1'
+
+	uci set firewall.nvm_vpn='zone'
+	uci set firewall.nvm_vpn.name="$vpn_zone"
+	uci set firewall.nvm_vpn.nvm_owner='1'
+	uci set firewall.nvm_vpn.input='REJECT'
+	uci set firewall.nvm_vpn.output='ACCEPT'
+	uci set firewall.nvm_vpn.forward='REJECT'
+	uci set firewall.nvm_vpn.masq='1'
+	uci set firewall.nvm_vpn.mtu_fix='1'
+	uci -q delete firewall.nvm_vpn.network || true
+	uci add_list "firewall.nvm_vpn.network=$wg"
+
+	set_rule_common nvm_to_vpn 'NordVPN Manager: protected network to tunnel'
+	uci set firewall.nvm_to_vpn.src="$source_zone"
+	uci set firewall.nvm_to_vpn.dest="$vpn_zone"
+	uci set firewall.nvm_to_vpn.src_ip="$subnet"
+	uci set firewall.nvm_to_vpn.proto='all'
+	uci set firewall.nvm_to_vpn.target='ACCEPT'
+
+	set_rule_common nvm_block_wan 'NordVPN Manager: kill switch'
+	uci set firewall.nvm_block_wan.src="$source_zone"
+	uci set firewall.nvm_block_wan.dest="$wan_zone"
+	uci set firewall.nvm_block_wan.src_ip="$subnet"
+	uci set firewall.nvm_block_wan.proto='all'
+	uci set firewall.nvm_block_wan.target='REJECT'
+
+	set_rule_common nvm_allow_wan 'NordVPN Manager: direct WAN fallback'
+	uci set firewall.nvm_allow_wan.src="$source_zone"
+	uci set firewall.nvm_allow_wan.dest="$wan_zone"
+	uci set firewall.nvm_allow_wan.src_ip="$subnet"
+	uci set firewall.nvm_allow_wan.proto='all'
+	uci set firewall.nvm_allow_wan.target='ACCEPT'
+
+	uci set firewall.nvm_dns_redirect='redirect'
+	uci set firewall.nvm_dns_redirect.name='NordVPN Manager: force encrypted DNS'
+	uci set firewall.nvm_dns_redirect.nvm_owner='1'
+	uci set firewall.nvm_dns_redirect.src="$source_zone"
+	uci set firewall.nvm_dns_redirect.dest="$source_zone"
+	uci set firewall.nvm_dns_redirect.src_ip="$subnet"
+	uci set firewall.nvm_dns_redirect.src_dport='53'
+	uci set firewall.nvm_dns_redirect.dest_ip="$protected_ip"
+	uci set firewall.nvm_dns_redirect.dest_port="$dns_port"
+	uci set firewall.nvm_dns_redirect.proto='tcp udp'
+	uci set firewall.nvm_dns_redirect.family='ipv4'
+	uci set firewall.nvm_dns_redirect.target='DNAT'
+	uci set firewall.nvm_dns_redirect.reflection='0'
+	uci set firewall.nvm_dns_redirect.enabled="$dns_enabled"
+
+	set_rule_common nvm_allow_dns 'NordVPN Manager: allow encrypted DNS listener'
+	uci set firewall.nvm_allow_dns.src="$source_zone"
+	uci set firewall.nvm_allow_dns.dest_ip="$protected_ip"
+	uci set firewall.nvm_allow_dns.dest_port="$dns_port"
+	uci set firewall.nvm_allow_dns.proto='tcp udp'
+	uci set firewall.nvm_allow_dns.target='ACCEPT'
+	uci set firewall.nvm_allow_dns.enabled="$dns_enabled"
+
+	set_rule_common nvm_block_external_dns 'NordVPN Manager: block external DNS and DoT'
+	uci set firewall.nvm_block_external_dns.src="$source_zone"
+	uci set firewall.nvm_block_external_dns.src_ip="$subnet"
+	uci set firewall.nvm_block_external_dns.dest_port='53 853'
+	uci set firewall.nvm_block_external_dns.proto='tcp udp'
+	uci set firewall.nvm_block_external_dns.target='REJECT'
+	uci set firewall.nvm_block_external_dns.enabled="$dns_enabled"
+}
+
+configure_firewall_mode() {
+	local enabled="$1"
+
+	case "$enabled" in
+		1)
+			uci set firewall.nvm_block_wan.enabled='1'
+			uci set firewall.nvm_allow_wan.enabled='0'
+			;;
+		0)
+			uci set firewall.nvm_block_wan.enabled='0'
+			uci set firewall.nvm_allow_wan.enabled='1'
+			;;
+		*) die 'Invalid kill switch state' ;;
+	esac
+}
+
+ensure_firewall_protocols() {
+	local section owner proto changed='0'
+
+	for section in nvm_to_vpn nvm_block_wan nvm_allow_wan; do
+		owner="$(uci -q get "firewall.$section.nvm_owner" 2>/dev/null || true)"
+		[ "$owner" = '1' ] || continue
+		proto="$(uci -q get "firewall.$section.proto" 2>/dev/null || true)"
+		[ "$proto" = 'all' ] && continue
+		uci set "firewall.$section.proto=all"
+		changed='1'
+	done
+	[ "$changed" = '1' ] || return 0
+	uci commit firewall
+	/etc/init.d/firewall reload >/dev/null 2>&1 || \
+		die 'Unable to apply the managed IPv4 firewall protocols'
+}
+
+configure_pbr_base() {
+	local wg subnet
+
+	wg="$(cfg wg_interface wg_nord)"
+	subnet="$(cfg protected_subnet)"
+	uci set pbr.config.enabled='1'
+	uci -q del_list "pbr.config.supported_interface=$wg" || true
+	uci add_list "pbr.config.supported_interface=$wg"
+
+	uci set pbr.nvm_protected='policy'
+	uci set pbr.nvm_protected.name='NordVPN Manager protected network'
+	uci set pbr.nvm_protected.nvm_owner='1'
+	uci set pbr.nvm_protected.interface="$wg"
+	uci set pbr.nvm_protected.src_addr="$subnet"
+	uci set pbr.nvm_protected.enabled='1'
+
+	uci set pbr.nvm_dns='policy'
+	uci set pbr.nvm_dns.name='NordVPN Manager encrypted DNS'
+	uci set pbr.nvm_dns.nvm_owner='1'
+	uci set pbr.nvm_dns.interface="$wg"
+	uci set pbr.nvm_dns.chain='output'
+	uci set pbr.nvm_dns.src_addr="$WG_SOURCE"
+	uci set pbr.nvm_dns.enabled='0'
+}
+
+provider_values() {
+	local provider="$1"
+
+	case "$provider" in
+		quad9)
+			# Quad9 validates its anycast address in TLS. Using the literal IP
+			# also keeps fallback DoH usable behind upstream DNS interception.
+			DNS_URL='https://9.9.9.9/dns-query'
+			DNS_BOOTSTRAP='9.9.9.9,149.112.112.112'
+			;;
+		cloudflare)
+			DNS_URL='https://cloudflare-dns.com/dns-query'
+			DNS_BOOTSTRAP='1.1.1.1,1.0.0.1'
+			;;
+		google)
+			DNS_URL='https://dns.google/dns-query'
+			DNS_BOOTSTRAP='8.8.8.8,8.8.4.4'
+			;;
+		adguard)
+			DNS_URL='https://dns.adguard-dns.com/dns-query'
+			DNS_BOOTSTRAP='94.140.14.14,94.140.15.15'
+			;;
+		custom)
+			DNS_URL="$(cfg dns_custom_url)"
+			DNS_BOOTSTRAP="$(cfg dns_custom_bootstrap)"
+			;;
+		*) die 'Unsupported encrypted DNS provider' ;;
+	esac
+}
+
+configure_dns_base() {
+	local mode provider listen_ip listen_port
+
+	mode="$(cfg dns_mode encrypted)"
+	provider="$(cfg dns_provider quad9)"
+	listen_ip="$(cfg protected_ip)"
+	listen_port="$(cfg dns_port 5053)"
+	if [ "$mode" != 'encrypted' ]; then
+		uci -q delete https-dns-proxy.nordvpn_manager || true
+		uci set pbr.nvm_dns.enabled='0'
+		return 0
+	fi
+
+	provider_values "$provider"
+	# This section is owned by the application. Recreate it so temporary or
+	# obsolete https-dns-proxy options cannot survive a route transition.
+	uci -q delete https-dns-proxy.nordvpn_manager || true
+	uci set "https-dns-proxy.nordvpn_manager=https-dns-proxy"
+	uci set https-dns-proxy.nordvpn_manager.nvm_owner='1'
+	uci set https-dns-proxy.nordvpn_manager.listen_addr="$listen_ip"
+	uci set https-dns-proxy.nordvpn_manager.listen_port="$listen_port"
+	uci set https-dns-proxy.nordvpn_manager.resolver_url="$DNS_URL"
+	uci set https-dns-proxy.nordvpn_manager.bootstrap_dns="$DNS_BOOTSTRAP"
+	uci set https-dns-proxy.nordvpn_manager.user='nobody'
+	uci set https-dns-proxy.nordvpn_manager.group='nogroup'
+	uci set https-dns-proxy.nordvpn_manager.force_ipv6_resolvers='0'
+}
+
+dns_proxy_healthy() {
+	local attempts="${1:-4}" listen_ip listen_port query response response_id
+	local client_pid count='0' size='0' result='1' query_id
+
+	[ "$(cfg dns_mode encrypted)" = 'encrypted' ] || return 1
+	listen_ip="$(cfg protected_ip)"
+	listen_port="$(cfg dns_port 5053)"
+	valid_ipv4 "$listen_ip" || return 1
+	valid_number "$listen_port" && [ "$listen_port" -ge 1 ] && \
+		[ "$listen_port" -le 65535 ] || return 1
+	valid_number "$attempts" && [ "$attempts" -ge 1 ] || attempts='4'
+	command -v nc >/dev/null 2>&1 || return 1
+
+	query="/tmp/nordvpn-manager-dns-query.$$"
+	response="/tmp/nordvpn-manager-dns-response.$$"
+	response_id="/tmp/nordvpn-manager-dns-id.$$"
+	query_id="$(printf '%02d' "$(( $$ % 100 ))")"
+	(
+		umask 077
+		# TCP length, DNS header and an A query for example.com.
+		printf '\000\035%s\001\000\000\001\000\000\000\000\000\000\007example\003com\000\000\001\000\001' \
+			"$query_id" > "$query"
+		printf '%s' "$query_id" > "$response_id"
+		: > "$response"
+	)
+
+	(
+		{ cat "$query"; sleep "$attempts"; } | \
+			nc "$listen_ip" "$listen_port" > "$response" 2>/dev/null
+	) &
+	client_pid="$!"
+	while [ "$count" -lt "$attempts" ]; do
+		sleep 1
+		size="$(wc -c < "$response" 2>/dev/null || printf '0')"
+		case "$size" in ''|*[!0-9]*) size='0' ;; esac
+		[ "$size" -ge 14 ] && break
+		kill -0 "$client_pid" 2>/dev/null || break
+		count=$((count + 1))
+	done
+	kill "$client_pid" 2>/dev/null || true
+	wait "$client_pid" 2>/dev/null || true
+
+	if [ "$size" -ge 14 ]; then
+		dd if="$response" of="${response_id}.received" bs=1 skip=2 count=2 \
+			2>/dev/null || true
+		cmp -s "$response_id" "${response_id}.received" && result='0'
+	fi
+	rm -f "$query" "$response" "$response_id" "${response_id}.received"
+	return "$result"
+}
+
+wait_for_dns_proxy() {
+	local attempts="${1:-3}" count='0'
+
+	valid_number "$attempts" && [ "$attempts" -ge 1 ] || attempts='3'
+	while [ "$count" -lt "$attempts" ]; do
+		dns_proxy_healthy 2 && return 0
+		count=$((count + 1))
+		[ "$count" -lt "$attempts" ] && sleep 1
+	done
+	return 1
+}
+
+pbr_operation_running() {
+	local cmdline
+
+	for cmdline in /proc/[0-9]*/cmdline; do
+		[ -r "$cmdline" ] || continue
+		# Compare complete argv entries. A substring match can mistake an
+		# unrelated shell command that merely mentions the PBR init script for
+		# a running PBR operation and hold DNS synchronization indefinitely.
+		tr '\000' '\n' < "$cmdline" 2>/dev/null | \
+			grep -Fqx '/etc/init.d/pbr' && return 0
+	done
+	return 1
+}
+
+wait_for_pbr_idle() {
+	local attempts="${1:-7}" count='0' quiet='0'
+
+	valid_number "$attempts" && [ "$attempts" -ge 2 ] || attempts='7'
+	# Give an immediate netifd trigger time to appear, then require two
+	# consecutive quiet samples before starting the managed PBR restart.
+	sleep 1
+	while [ "$count" -lt "$attempts" ]; do
+		if pbr_operation_running; then
+			quiet='0'
+		else
+			quiet=$((quiet + 1))
+			[ "$quiet" -ge 2 ] && return 0
+		fi
+		count=$((count + 1))
+		[ "$count" -lt "$attempts" ] && sleep 1
+	done
+	return 1
+}
+
+pbr_table_id() {
+	local wg name table
+
+	wg="$(cfg wg_interface wg_nord)"
+	name="pbr_$wg"
+	table="$(awk -v wanted="$name" '$2 == wanted { print $1 }' /etc/iproute2/rt_tables 2>/dev/null | tail -n1)"
+	[ -n "$table" ] || table="$(cfg pbr_table_id 0)"
+	case "$table" in ''|*[!0-9]*) table='0' ;; esac
+	printf '%s\n' "$table"
+}
+
+sync_pbr_table_id() {
+	local table
+
+	table="$(pbr_table_id)"
+	[ "$table" -gt 0 ] || return 0
+	uci set "$CONFIG.$SECTION.pbr_table_id=$table"
+	uci commit "$CONFIG"
+}
+
+wan_device() {
+	local wan dev
+
+	wan="$(cfg wan_network wan)"
+	dev="$(ubus call "network.interface.$wan" status 2>/dev/null | jsonfilter -e '@.l3_device' 2>/dev/null || true)"
+	[ -n "$dev" ] || dev="$(uci -q get "network.$wan.device" 2>/dev/null || true)"
+	printf '%s\n' "$dev"
+}
+
+wan_gateway() {
+	local wan status gateway
+
+	wan="$(cfg wan_network wan)"
+	status="$(ubus call "network.interface.$wan" status 2>/dev/null || true)"
+	gateway="$(printf '%s' "$status" | jsonfilter -e '@.route[0].nexthop' 2>/dev/null || true)"
+	valid_ipv4 "$gateway" && printf '%s\n' "$gateway" || true
+}
+
+remove_fallback_route() {
+	local table="$1"
+
+	# PBR installs an unmetriced unreachable route while its target interface
+	# is down. Remove that route as well as the manager-owned metric variant.
+	ip -4 route del unreachable default table "$table" >/dev/null 2>&1 || true
+	ip -4 route del unreachable default table "$table" metric "$FALLBACK_METRIC" >/dev/null 2>&1 || true
+	ip -4 route del default table "$table" metric "$FALLBACK_METRIC" >/dev/null 2>&1 || true
+}
+
+apply_fallback_route() {
+	local killswitch="$1"
+	local table dev gateway
+
+	table="$(pbr_table_id)"
+	[ "$table" -gt 0 ] || return 0
+	remove_fallback_route "$table"
+	if [ "$killswitch" = '1' ]; then
+		ip -4 route replace unreachable default table "$table" \
+			metric "$FALLBACK_METRIC" >/dev/null 2>&1 || \
+			die 'Unable to install the fail-closed route'
+		return 0
+	fi
+
+	dev="$(wan_device)"
+	[ -n "$dev" ] || die 'Unable to determine the WAN device for fallback'
+	gateway="$(wan_gateway)"
+	if [ -n "$gateway" ]; then
+		ip -4 route replace default via "$gateway" dev "$dev" table "$table" \
+			metric "$FALLBACK_METRIC" >/dev/null 2>&1 || \
+			die 'Unable to install the WAN fallback route'
+	else
+		ip -4 route replace default dev "$dev" table "$table" \
+			metric "$FALLBACK_METRIC" >/dev/null 2>&1 || \
+			die 'Unable to install the WAN fallback route'
+	fi
+}
+
+wireguard_connected() {
+	local wg now last age
+
+	wg="$(cfg wg_interface wg_nord)"
+	last="$(wg show "$wg" latest-handshakes 2>/dev/null | awk 'NR == 1 { print $2 }')"
+	case "$last" in ''|0|*[!0-9]*) return 1 ;; esac
+	now="$(date +%s)"
+	age=$((now - last))
+	[ "$age" -ge 0 ] && [ "$age" -le 180 ]
+}
+
+sync_dns_route() {
+	local mode killswitch route='blocked'
+
+	mode="$(cfg dns_mode encrypted)"
+	[ "$mode" = 'encrypted' ] || return 0
+	killswitch="$(cfg killswitch_enabled 1)"
+	if wireguard_connected; then
+		route='vpn'
+	elif [ "$killswitch" = '0' ]; then
+		route='wan'
+	fi
+
+	case "$route" in
+		vpn)
+			configure_dns_base
+			uci set https-dns-proxy.nordvpn_manager.source_addr="$WG_SOURCE"
+			uci set pbr.nvm_dns.enabled='1'
+			;;
+		wan)
+			configure_dns_base
+			uci -q delete https-dns-proxy.nordvpn_manager.source_addr || true
+			uci set pbr.nvm_dns.enabled='0'
+			;;
+		blocked)
+			# https-dns-proxy 2026.03 does not implement a per-instance
+			# enabled option. Removing the owned section is the only way to
+			# guarantee that fail-closed mode has no outbound DoH listener.
+			uci -q delete https-dns-proxy.nordvpn_manager || true
+			uci set pbr.nvm_dns.enabled='0'
+			;;
+	esac
+	uci commit https-dns-proxy
+	uci commit pbr
+	wait_for_pbr_idle 7 || {
+		logger -t nordvpn-manager 'Timed out waiting for a pending PBR interface reload'
+		return 1
+	}
+	/etc/init.d/pbr restart >/dev/null 2>&1 || true
+	sync_pbr_table_id
+	apply_fallback_route "$killswitch"
+	# OpenWrt 25.12 may return a non-zero code from reload even when procd has
+	# started the instance. Verify the owned listener with a real DNS exchange.
+	/etc/init.d/https-dns-proxy restart >/dev/null 2>&1 || true
+	[ "$route" = 'blocked' ] || wait_for_dns_proxy 3
+}
+
+configure_from_input() {
+	local input="$1"
+	local wan='wan' protected='' wg='wg_nord' vpn_zone='nordvpn'
+	local mtu='1420' dns_mode='encrypted' dns_provider='quad9' dns_port='5053'
+	local custom_url='' custom_bootstrap='' killswitch='1'
+	local line key value existing_zone
+
+	[ -r "$input" ] || die 'Unable to read the configuration input'
+	while IFS= read -r line; do
+		key="${line%%=*}"
+		value="${line#*=}"
+		case "$key" in
+			wan_network) wan="$value" ;;
+			protected_network) protected="$value" ;;
+			wg_interface) wg="$value" ;;
+			vpn_zone) vpn_zone="$value" ;;
+			mtu) mtu="$value" ;;
+			dns_mode) dns_mode="$value" ;;
+			dns_provider) dns_provider="$value" ;;
+			dns_port) dns_port="$value" ;;
+			dns_custom_url) custom_url="$value" ;;
+			dns_custom_bootstrap) custom_bootstrap="$value" ;;
+			killswitch_enabled) killswitch="$value" ;;
+			'') ;;
+			*) die "Unsupported configuration field: $key" ;;
+		esac
+	done < "$input"
+
+	valid_interface_name "$wg" || die 'Invalid WireGuard interface name'
+	valid_zone "$vpn_zone" || die 'Invalid VPN firewall zone name'
+	valid_number "$mtu" && [ "$mtu" -ge 1280 ] && [ "$mtu" -le 1500 ] || die 'MTU must be between 1280 and 1500'
+	valid_number "$dns_port" && [ "$dns_port" -ge 1024 ] && [ "$dns_port" -le 65535 ] || die 'DNS port must be between 1024 and 65535'
+	case "$dns_mode" in encrypted|system) ;; *) die 'Unsupported DNS mode' ;; esac
+	case "$dns_provider" in quad9|cloudflare|google|adguard|custom) ;; *) die 'Unsupported DNS provider' ;; esac
+	case "$killswitch" in 0|1) ;; *) die 'Invalid kill switch state' ;; esac
+	if [ "$dns_provider" = 'custom' ]; then
+		printf '%s' "$custom_url" | grep -Eq '^https://[A-Za-z0-9._~:/?&=%+-]+$' || die 'Custom DNS URL must be a valid HTTPS URL'
+		printf '%s' "$custom_bootstrap" | grep -Eq '^[0-9.,]+$' || die 'Custom bootstrap DNS must contain IPv4 addresses separated by commas'
+	fi
+
+	preflight_networks "$wan" "$protected" >/dev/null
+	[ "$(cfg enabled 0)" = '0' ] && [ "$(cfg desired_enabled 0)" = '0' ] || \
+		die 'Disconnect NordVPN before changing its configuration'
+	if [ "$(cfg configured 0)" = '1' ]; then
+		[ "$(cfg wg_interface wg_nord)" = "$wg" ] || die 'Reset the configuration before changing the WireGuard interface name'
+		[ "$(cfg vpn_zone nordvpn)" = "$vpn_zone" ] || die 'Reset the configuration before changing the VPN firewall zone name'
+	fi
+	assert_managed_sections_available "$wg"
+	existing_zone="$(zone_section_by_name "$vpn_zone" || true)"
+	[ -z "$existing_zone" ] || [ "$existing_zone" = 'firewall.nvm_vpn' ] || die 'The requested VPN firewall zone already exists and is not owned by NordVPN Manager'
+
+	begin_transaction
+	uci -q get "$CONFIG.$SECTION" >/dev/null 2>&1 || uci set "$CONFIG.$SECTION=settings"
+	uci set "$CONFIG.$SECTION.configured=1"
+	uci set "$CONFIG.$SECTION.enabled=0"
+	uci set "$CONFIG.$SECTION.desired_enabled=0"
+	uci set "$CONFIG.$SECTION.wan_network=$wan"
+	uci set "$CONFIG.$SECTION.protected_network=$protected"
+	uci set "$CONFIG.$SECTION.protected_ip=$PREFLIGHT_IP"
+	uci set "$CONFIG.$SECTION.protected_subnet=$PREFLIGHT_SUBNET"
+	uci set "$CONFIG.$SECTION.source_zone=$PREFLIGHT_SOURCE_ZONE"
+	uci set "$CONFIG.$SECTION.wan_zone=$PREFLIGHT_WAN_ZONE"
+	uci set "$CONFIG.$SECTION.wg_interface=$wg"
+	uci set "$CONFIG.$SECTION.vpn_zone=$vpn_zone"
+	uci set "$CONFIG.$SECTION.mtu=$mtu"
+	uci set "$CONFIG.$SECTION.dns_mode=$dns_mode"
+	uci set "$CONFIG.$SECTION.dns_provider=$dns_provider"
+	uci set "$CONFIG.$SECTION.dns_port=$dns_port"
+	uci set "$CONFIG.$SECTION.killswitch_enabled=$killswitch"
+	if [ "$dns_provider" = 'custom' ]; then
+		uci set "$CONFIG.$SECTION.dns_custom_url=$custom_url"
+		uci set "$CONFIG.$SECTION.dns_custom_bootstrap=$custom_bootstrap"
+	else
+		uci -q delete "$CONFIG.$SECTION.dns_custom_url" || true
+		uci -q delete "$CONFIG.$SECTION.dns_custom_bootstrap" || true
+	fi
+	uci -q delete "$CONFIG.$SECTION.selected_server_id" || true
+	uci -q delete "$CONFIG.$SECTION.selected_hostname" || true
+	uci -q delete "$CONFIG.$SECTION.active_endpoint" || true
+	uci set "$CONFIG.$SECTION.pbr_table_id=0"
+	uci commit "$CONFIG"
+
+	configure_firewall_base
+	configure_firewall_mode "$killswitch"
+	configure_pbr_base
+	configure_dns_base
+	uci commit firewall
+	uci commit pbr
+	uci commit https-dns-proxy
+	/etc/init.d/firewall reload >/dev/null 2>&1 || die 'Unable to reload firewall4'
+	sync_dns_route || die 'Unable to start encrypted DNS'
+	chmod 600 "/etc/config/$CONFIG"
+	end_transaction
+	printf 'configured=1\n'
+	printf 'protected_subnet=%s\n' "$PREFLIGHT_SUBNET"
+}
+
+set_killswitch() {
+	local desired="$1"
+
+	case "$desired" in 0|1) ;; *) die 'Invalid kill switch state' ;; esac
+	[ "$(cfg configured 0)" = '1' ] || die 'NordVPN Manager is not configured'
+	[ "$(cfg killswitch_enabled 1)" != "$desired" ] || return 0
+	begin_transaction
+	if [ "$desired" = '1' ]; then
+		configure_firewall_mode '1'
+		uci commit firewall
+		/etc/init.d/firewall reload >/dev/null 2>&1 || die 'Unable to close the WAN fallback'
+		apply_fallback_route '1'
+	else
+		apply_fallback_route '0'
+		configure_firewall_mode '0'
+		uci commit firewall
+		/etc/init.d/firewall reload >/dev/null 2>&1 || die 'Unable to open the WAN fallback'
+	fi
+	uci set "$CONFIG.$SECTION.killswitch_enabled=$desired"
+	uci commit "$CONFIG"
+	sync_dns_route || die 'Unable to start encrypted DNS'
+	end_transaction
+}
+
+switch_guard() {
+	local target="$1"
+	local current now timestamp age count oldest latest wait tmp window limit interval
+
+	current="$(cfg selected_server_id)"
+	[ -n "$current" ] && [ "$current" = "$target" ] && return 0
+	window="$(cfg switch_window 600)"
+	limit="$(cfg switch_limit 3)"
+	interval="$(cfg switch_min_interval 90)"
+	valid_number "$window" || window='600'
+	valid_number "$limit" || limit='3'
+	valid_number "$interval" || interval='90'
+	now="$(date +%s)"
+	tmp="${SWITCH_HISTORY}.$$"
+	: > "$tmp"
+	if [ -r "$SWITCH_HISTORY" ]; then
+		while IFS= read -r timestamp; do
+			case "$timestamp" in ''|*[!0-9]*) continue ;; esac
+			age=$((now - timestamp))
+			[ "$age" -ge 0 ] && [ "$age" -lt "$window" ] && printf '%s\n' "$timestamp" >> "$tmp"
+		done < "$SWITCH_HISTORY"
+	fi
+	count="$(wc -l < "$tmp" | tr -d ' ')"
+	if [ "$count" -gt 0 ]; then
+		latest="$(tail -n1 "$tmp")"
+		wait=$((interval - (now - latest)))
+		if [ "$wait" -gt 0 ]; then
+			mv "$tmp" "$SWITCH_HISTORY"
+			chmod 600 "$SWITCH_HISTORY"
+			die "Wait ${wait}s before changing NordVPN servers again"
+		fi
+	fi
+	if [ "$count" -ge "$limit" ]; then
+		oldest="$(sed -n '1p' "$tmp")"
+		wait=$((window - (now - oldest)))
+		[ "$wait" -gt 0 ] || wait='1'
+		mv "$tmp" "$SWITCH_HISTORY"
+		chmod 600 "$SWITCH_HISTORY"
+		die "The server change limit was reached; wait ${wait}s"
+	fi
+	printf '%s\n' "$now" >> "$tmp"
+	mv "$tmp" "$SWITCH_HISTORY"
+	chmod 600 "$SWITCH_HISTORY"
+}
+
+switch_status() {
+	local now timestamp age count='0' oldest='0' latest='0' min_wait='0' window_wait='0'
+	local window limit interval available
+
+	window="$(cfg switch_window 600)"
+	limit="$(cfg switch_limit 3)"
+	interval="$(cfg switch_min_interval 90)"
+	now="$(date +%s)"
+	if [ -r "$SWITCH_HISTORY" ]; then
+		while IFS= read -r timestamp; do
+			case "$timestamp" in ''|*[!0-9]*) continue ;; esac
+			age=$((now - timestamp))
+			[ "$age" -ge 0 ] && [ "$age" -lt "$window" ] || continue
+			count=$((count + 1))
+			[ "$oldest" -gt 0 ] || oldest="$timestamp"
+			latest="$timestamp"
+		done < "$SWITCH_HISTORY"
+	fi
+	if [ "$latest" -gt 0 ]; then
+		min_wait=$((interval - (now - latest)))
+		[ "$min_wait" -gt 0 ] || min_wait='0'
+	fi
+	if [ "$count" -ge "$limit" ] && [ "$oldest" -gt 0 ]; then
+		window_wait=$((window - (now - oldest)))
+		[ "$window_wait" -gt 0 ] || window_wait='0'
+	fi
+	available=$((limit - count))
+	[ "$available" -ge 0 ] || available='0'
+	printf 'count=%s\nlimit=%s\navailable=%s\nmin_wait=%s\nwindow_wait=%s\n' \
+		"$count" "$limit" "$available" "$min_wait" "$window_wait"
+}
+
+safe_record_text() {
+	[ "${#1}" -le 120 ] || return 1
+	! printf '%s' "$1" | grep -q '[[:cntrl:]]'
+}
+
+load_server_record() {
+	local path="$1"
+	local line key value
+
+	[ -r "$path" ] || die 'Unable to read the NordVPN server record'
+	SERVER_ID=''
+	HOSTNAME=''
+	STATION=''
+	PUBLIC_KEY=''
+	COUNTRY_CODE=''
+	COUNTRY_NAME=''
+	CITY_NAME=''
+	SERVER_GROUPS=''
+	LOAD='0'
+	while IFS= read -r line; do
+		key="${line%%=*}"
+		value="${line#*=}"
+		case "$key" in
+			server_id) SERVER_ID="$value" ;;
+			hostname) HOSTNAME="$value" ;;
+			station) STATION="$value" ;;
+			public_key) PUBLIC_KEY="$value" ;;
+			country_code) COUNTRY_CODE="$value" ;;
+			country_name) COUNTRY_NAME="$value" ;;
+			city_name) CITY_NAME="$value" ;;
+			groups) SERVER_GROUPS="$value" ;;
+			load) LOAD="$value" ;;
+		esac
+	done < "$path"
+	valid_number "$SERVER_ID" && [ "$SERVER_ID" -gt 0 ] || die 'Invalid NordVPN server id'
+	printf '%s' "$HOSTNAME" | grep -Eq '^[a-z0-9-]+\.nordvpn\.com$' || die 'Invalid NordVPN hostname'
+	valid_ipv4 "$STATION" || die 'Invalid NordVPN endpoint'
+	valid_wireguard_key "$PUBLIC_KEY" || die 'Invalid NordVPN server public key'
+	printf '%s' "$COUNTRY_CODE" | grep -Eq '^[A-Z]{2}$' || die 'Invalid NordVPN country code'
+	safe_record_text "$COUNTRY_NAME" || die 'Invalid NordVPN country name'
+	safe_record_text "$CITY_NAME" || die 'Invalid NordVPN city name'
+	printf '%s' "$SERVER_GROUPS" | grep -Eq '^[0-9,]*$' || die 'Invalid NordVPN group list'
+	valid_number "$LOAD" || LOAD='0'
+}
+
+persist_server_record() {
+	local tmp="${ACTIVE_SERVER}.tmp.$$"
+
+	mkdir -p "$STATE_DIR"
+	chmod 700 "$STATE_DIR"
+	(umask 077; {
+		printf 'server_id=%s\n' "$SERVER_ID"
+		printf 'hostname=%s\n' "$HOSTNAME"
+		printf 'station=%s\n' "$STATION"
+		printf 'public_key=%s\n' "$PUBLIC_KEY"
+		printf 'country_code=%s\n' "$COUNTRY_CODE"
+		printf 'country_name=%s\n' "$COUNTRY_NAME"
+		printf 'city_name=%s\n' "$CITY_NAME"
+		printf 'groups=%s\n' "$SERVER_GROUPS"
+		printf 'load=%s\n' "$LOAD"
+	} > "$tmp")
+	chmod 600 "$tmp"
+	mv "$tmp" "$ACTIVE_SERVER"
+}
+
+add_endpoint_route() {
+	local endpoint="$1"
+	local dev gateway
+
+	valid_ipv4 "$endpoint" || return 0
+	dev="$(wan_device)"
+	[ -n "$dev" ] || die 'Unable to determine the WAN device'
+	gateway="$(wan_gateway)"
+	if [ -n "$gateway" ]; then
+		ip -4 route replace "$endpoint/32" via "$gateway" dev "$dev" >/dev/null 2>&1 || die 'Unable to pin the VPN endpoint to WAN'
+	else
+		ip -4 route replace "$endpoint/32" dev "$dev" >/dev/null 2>&1 || die 'Unable to pin the VPN endpoint to WAN'
+	fi
+}
+
+remove_endpoint_route() {
+	local endpoint="$1"
+	valid_ipv4 "$endpoint" || return 0
+	ip -4 route del "$endpoint/32" >/dev/null 2>&1 || true
+}
+
+configure_wireguard() {
+	local private_key wg peer wan mtu
+
+	[ -r "$KEY_FILE" ] || die 'NordLynx credentials are not enrolled'
+	IFS= read -r private_key < "$KEY_FILE" || true
+	valid_wireguard_key "$private_key" || die 'The stored NordLynx key is invalid'
+	wg="$(cfg wg_interface wg_nord)"
+	peer="${wg}_peer"
+	assert_owned_or_absent network "$wg"
+	assert_owned_or_absent network "$peer"
+	wan="$(cfg wan_network wan)"
+	mtu="$(cfg mtu 1420)"
+
+	/sbin/ifdown "$wg" >/dev/null 2>&1 || true
+	while uci -q delete "network.$peer"; do :; done
+	while uci -q delete "network.$wg"; do :; done
+	uci set "network.$wg=interface"
+	uci set "network.$wg.nvm_owner=1"
+	uci set "network.$wg.proto=wireguard"
+	uci set "network.$wg.private_key=$private_key"
+	uci -q delete "network.$wg.addresses" || true
+	uci add_list "network.$wg.addresses=$WG_ADDRESS"
+	uci set "network.$wg.auto=1"
+	uci set "network.$wg.peerdns=0"
+	uci set "network.$wg.defaultroute=0"
+	uci set "network.$wg.tunlink=$wan"
+	uci set "network.$wg.mtu=$mtu"
+	uci set "network.$peer=wireguard_$wg"
+	uci set "network.$peer.nvm_owner=1"
+	uci set "network.$peer.public_key=$PUBLIC_KEY"
+	uci set "network.$peer.endpoint_host=$STATION"
+	uci set "network.$peer.endpoint_port=51820"
+	uci -q delete "network.$peer.allowed_ips" || true
+	uci add_list "network.$peer.allowed_ips=0.0.0.0/0"
+	uci set "network.$peer.route_allowed_ips=0"
+	uci set "network.$peer.persistent_keepalive=25"
+	uci commit network
+}
+
+wait_for_handshake() {
+	local started="$1"
+	local wg attempts count='0' latest
+
+	wg="$(cfg wg_interface wg_nord)"
+	attempts="$(cfg handshake_attempts 15)"
+	valid_number "$attempts" || attempts='15'
+	while [ "$count" -lt "$attempts" ]; do
+		latest="$(wg show "$wg" latest-handshakes 2>/dev/null | awk 'NR == 1 { print $2 }')"
+		case "$latest" in ''|*[!0-9]*) latest='0' ;; esac
+		[ "$latest" -ge "$started" ] && return 0
+		ping -I "$wg" -c 1 -W 1 1.1.1 >/dev/null 2>&1 || true
+		count=$((count + 1))
+		sleep 1
+	done
+	return 1
+}
+
+write_connection_state() {
+	local enabled="$1"
+
+	uci set "$CONFIG.$SECTION.enabled=$enabled"
+	if [ "$enabled" = '1' ]; then
+		uci set "$CONFIG.$SECTION.desired_enabled=1"
+		uci set "$CONFIG.$SECTION.selected_server_id=$SERVER_ID"
+		uci set "$CONFIG.$SECTION.selected_hostname=$HOSTNAME"
+		uci set "$CONFIG.$SECTION.active_endpoint=$STATION"
+	else
+		uci -q delete "$CONFIG.$SECTION.active_endpoint" || true
+	fi
+	uci commit "$CONFIG"
+	chmod 600 "/etc/config/$CONFIG"
+}
+
+connect_record() {
+	local record="$1"
+	local rollback="${2:-0}"
+	local previous='/tmp/nordvpn-manager-previous.'"$$"'.'"$rollback"
+	local previous_id previous_enabled started failed_endpoint failed_id wg
+
+	previous_id="$(cfg selected_server_id)"
+	previous_enabled="$(cfg enabled 0)"
+	if [ "$rollback" = '0' ] && [ -r "$ACTIVE_SERVER" ]; then
+		cp "$ACTIVE_SERVER" "$previous"
+		chmod 600 "$previous"
+	fi
+	load_server_record "$record"
+	[ "$rollback" = '1' ] || switch_guard "$SERVER_ID"
+	printf '%s\n' "$(date +%s)" > "$PROFILE_CHANGE"
+	chmod 600 "$PROFILE_CHANGE"
+	failed_endpoint="$STATION"
+	failed_id="$SERVER_ID"
+
+	configure_wireguard
+	add_endpoint_route "$STATION"
+	started="$(date +%s)"
+	wg="$(cfg wg_interface wg_nord)"
+	/sbin/ifup "$wg"
+	sleep 1
+	if ! wait_for_handshake "$started"; then
+		logger -t nordvpn-manager "No WireGuard handshake from server $SERVER_ID"
+		/sbin/ifdown "$wg" >/dev/null 2>&1 || true
+		remove_endpoint_route "$failed_endpoint"
+		write_connection_state '0'
+		sync_dns_route || true
+		if [ "$rollback" = '0' ] && [ "$previous_enabled" = '1' ] && \
+			[ -s "$previous" ] && [ "$previous_id" != "$SERVER_ID" ]; then
+			logger -t nordvpn-manager "Restoring previous NordVPN server $previous_id"
+			if connect_record "$previous" '1'; then
+				rm -f "$previous"
+				die "Server $failed_id did not respond; server $previous_id was restored"
+			fi
+		fi
+		rm -f "$previous"
+		die "Server $failed_id did not establish a WireGuard handshake"
+	fi
+
+	if ! sync_dns_route; then
+		logger -t nordvpn-manager "Encrypted DNS failed after connecting server $SERVER_ID"
+		/sbin/ifdown "$wg" >/dev/null 2>&1 || true
+		remove_endpoint_route "$failed_endpoint"
+		write_connection_state '0'
+		sync_dns_route || true
+		if [ "$rollback" = '0' ] && [ "$previous_enabled" = '1' ] && \
+			[ -s "$previous" ] && [ "$previous_id" != "$SERVER_ID" ]; then
+			logger -t nordvpn-manager "Restoring previous NordVPN server $previous_id after DNS failure"
+			if connect_record "$previous" '1'; then
+				rm -f "$previous"
+				die "Server $failed_id connected without working encrypted DNS; server $previous_id was restored"
+			fi
+		fi
+		rm -f "$previous"
+		die "Server $failed_id connected without working encrypted DNS"
+	fi
+	persist_server_record
+	write_connection_state '1'
+	mkdir -p /tmp/nordvpn-manager-health
+	printf '0\n' > /tmp/nordvpn-manager-health/failures
+	rm -f "$previous"
+}
+
+disconnect_vpn() {
+	local wg endpoint
+
+	wg="$(cfg wg_interface wg_nord)"
+	endpoint="$(cfg active_endpoint)"
+	uci set "$CONFIG.$SECTION.desired_enabled=0"
+	uci commit "$CONFIG"
+	/sbin/ifdown "$wg" >/dev/null 2>&1 || true
+	uci -q set "network.$wg.auto=0" || true
+	uci commit network >/dev/null 2>&1 || true
+	remove_endpoint_route "$endpoint"
+	write_connection_state '0'
+	sync_dns_route || die 'Unable to start encrypted DNS for the selected fallback mode'
+}
+
+reconnect_vpn() {
+	[ -r "$ACTIVE_SERVER" ] || die 'No previously selected NordVPN server is available'
+	connect_record "$ACTIVE_SERVER" '1'
+}
+
+auto_reconnect_vpn() {
+	[ "$(cfg desired_enabled 0)" = '1' ] || return 0
+	reconnect_vpn
+}
+
+set_favorite() {
+	local id="$1"
+	local desired="$2"
+	local current item found='0'
+
+	valid_number "$id" && [ "$id" -gt 0 ] || die 'Invalid favorite server id'
+	case "$desired" in 0|1) ;; *) die 'Invalid favorite state' ;; esac
+	current="$(cfg favorites)"
+	uci -q delete "$CONFIG.$SECTION.favorites" || true
+	for item in $current; do
+		valid_number "$item" || continue
+		if [ "$item" = "$id" ]; then
+			found='1'
+			[ "$desired" = '0' ] && continue
+		fi
+		uci add_list "$CONFIG.$SECTION.favorites=$item"
+	done
+	[ "$desired" = '1' ] && [ "$found" = '0' ] && uci add_list "$CONFIG.$SECTION.favorites=$id"
+	uci commit "$CONFIG"
+}
+
+unlink_account() {
+	disconnect_vpn
+	"$API" purge >/dev/null
+	rm -f "$ACTIVE_SERVER"
+	uci -q delete "$CONFIG.$SECTION.selected_server_id" || true
+	uci -q delete "$CONFIG.$SECTION.selected_hostname" || true
+	uci commit "$CONFIG"
+}
+
+reset_configuration() {
+	local wg peer
+
+	[ "$(cfg enabled 0)" = '0' ] && [ "$(cfg desired_enabled 0)" = '0' ] || \
+		die 'Disconnect the VPN before resetting its configuration'
+	wg="$(cfg wg_interface wg_nord)"
+	peer="${wg}_peer"
+	assert_managed_sections_available "$wg"
+	begin_transaction
+	/sbin/ifdown "$wg" >/dev/null 2>&1 || true
+	for section in nvm_vpn nvm_to_vpn nvm_block_wan nvm_allow_wan nvm_dns_redirect nvm_allow_dns nvm_block_external_dns; do
+		uci -q delete "firewall.$section" || true
+	done
+	uci -q delete pbr.nvm_protected || true
+	uci -q delete pbr.nvm_dns || true
+	uci -q del_list "pbr.config.supported_interface=$wg" || true
+	uci -q delete https-dns-proxy.nordvpn_manager || true
+	uci -q delete "network.$peer" || true
+	uci -q delete "network.$wg" || true
+	uci commit firewall
+	uci commit pbr
+	uci commit https-dns-proxy
+	uci commit network
+	uci set "$CONFIG.$SECTION.configured=0"
+	uci set "$CONFIG.$SECTION.enabled=0"
+	uci set "$CONFIG.$SECTION.desired_enabled=0"
+	uci set "$CONFIG.$SECTION.protected_network="
+	uci set "$CONFIG.$SECTION.protected_subnet="
+	uci set "$CONFIG.$SECTION.protected_ip="
+	uci set "$CONFIG.$SECTION.source_zone="
+	uci set "$CONFIG.$SECTION.wan_zone="
+	uci -q delete "$CONFIG.$SECTION.selected_server_id" || true
+	uci -q delete "$CONFIG.$SECTION.selected_hostname" || true
+	uci -q delete "$CONFIG.$SECTION.active_endpoint" || true
+	uci commit "$CONFIG"
+	/etc/init.d/firewall reload >/dev/null 2>&1 || true
+	/etc/init.d/pbr restart >/dev/null 2>&1 || true
+	/etc/init.d/https-dns-proxy restart >/dev/null 2>&1 || true
+	"$API" purge >/dev/null
+	rm -f "$ACTIVE_SERVER"
+	end_transaction
+}
+
+show_status() {
+	local configured enabled killswitch wg connected='0' fallback='unknown'
+	local table route pbr='0' dns='0' handshake='0' now last
+
+	configured="$(cfg configured 0)"
+	enabled="$(cfg enabled 0)"
+	killswitch="$(cfg killswitch_enabled 1)"
+	wg="$(cfg wg_interface wg_nord)"
+	if wireguard_connected; then connected='1'; fi
+	last="$(wg show "$wg" latest-handshakes 2>/dev/null | awk 'NR == 1 { print $2 }')"
+	case "$last" in ''|*[!0-9]*) last='0' ;; esac
+	if [ "$last" -gt 0 ]; then now="$(date +%s)"; handshake=$((now - last)); fi
+	table="$(pbr_table_id)"
+	if [ "$table" -gt 0 ]; then
+		route="$(ip -4 route show table "$table" 2>/dev/null || true)"
+		printf '%s\n' "$route" | grep -q '^default dev ' && pbr='1'
+		if printf '%s\n' "$route" | grep -q '^unreachable default'; then
+			fallback='blocked'
+		elif printf '%s\n' "$route" | grep -q "metric $FALLBACK_METRIC"; then
+			fallback='wan'
+		fi
+	fi
+	if [ "$(cfg dns_mode encrypted)" = 'encrypted' ] && dns_proxy_healthy 2; then
+		dns='1'
+	fi
+	printf 'configured=%s\n' "$configured"
+	printf 'enabled=%s\n' "$enabled"
+	printf 'desired_enabled=%s\n' "$(cfg desired_enabled 0)"
+	printf 'killswitch_enabled=%s\n' "$killswitch"
+	printf 'connected=%s\n' "$connected"
+	printf 'fallback=%s\n' "$fallback"
+	printf 'pbr_running=%s\n' "$pbr"
+	printf 'dns_running=%s\n' "$dns"
+	printf 'handshake_age=%s\n' "$handshake"
+	printf 'selected_server_id=%s\n' "$(cfg selected_server_id)"
+	printf 'selected_hostname=%s\n' "$(cfg selected_hostname)"
+	printf 'protected_network=%s\n' "$(cfg protected_network)"
+	printf 'protected_subnet=%s\n' "$(cfg protected_subnet)"
+	printf 'wan_network=%s\n' "$(cfg wan_network wan)"
+	printf 'wg_interface=%s\n' "$wg"
+	printf 'dns_mode=%s\n' "$(cfg dns_mode encrypted)"
+	printf 'dns_provider=%s\n' "$(cfg dns_provider quad9)"
+}
+
+reconcile() {
+	local killswitch
+
+	[ "$(cfg configured 0)" = '1' ] || return 0
+	killswitch="$(cfg killswitch_enabled 1)"
+	ensure_firewall_protocols
+	apply_fallback_route "$killswitch"
+	sync_dns_route || return 1
+}
+
+can_uninstall() {
+	[ "$(cfg configured 0)" = '0' ] && [ "$(cfg enabled 0)" = '0' ] && \
+		[ "$(cfg desired_enabled 0)" = '0' ]
+}
+
+command="${1:-status}"
+case "$command" in
+	status) show_status ;;
+	preflight)
+		[ -n "${2:-}" ] && [ -n "${3:-}" ] || die 'Usage: preflight <wan-network> <protected-network>'
+		preflight_networks "$2" "$3"
+		;;
+	switch-status) switch_status ;;
+	can-uninstall) can_uninstall ;;
+	*)
+		acquire_lock
+		case "$command" in
+			configure)
+				[ -n "${2:-}" ] || die 'Missing configuration input'
+				configure_from_input "$2"
+				;;
+			connect-server)
+				[ -n "${2:-}" ] || die 'Missing server input'
+				[ "$(cfg configured 0)" = '1' ] || die 'NordVPN Manager is not configured'
+				connect_record "$2"
+				;;
+			disconnect) disconnect_vpn ;;
+			reconnect) reconnect_vpn ;;
+			auto-reconnect) auto_reconnect_vpn ;;
+			set-killswitch)
+				[ -n "${2:-}" ] || die 'Missing kill switch state'
+				set_killswitch "$2"
+				;;
+			favorite)
+				[ -n "${2:-}" ] && [ -n "${3:-}" ] || die 'Usage: favorite <server-id> <0|1>'
+				set_favorite "$2" "$3"
+				;;
+			unlink) unlink_account ;;
+			reset-configuration) reset_configuration ;;
+			reconcile) reconcile ;;
+			*) die 'Unsupported NordVPN Manager command' ;;
+		esac
+		;;
+esac

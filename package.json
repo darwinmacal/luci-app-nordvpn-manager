@@ -1,0 +1,11 @@
+{
+  "name": "luci-app-nordvpn-manager-qa",
+  "version": "0.1.0",
+  "private": true,
+  "scripts": {
+    "qa:ui": "node tests/ui/qa.mjs"
+  },
+  "devDependencies": {
+    "playwright": "^1.61.1"
+  }
+}

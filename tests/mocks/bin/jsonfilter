@@ -1,0 +1,9 @@
+#!/bin/sh
+
+input="$(cat)"
+case "$*" in
+	*'ipv6-address'*) exit 0 ;;
+	*'l3_device'*) printf '%s' "$input" | grep -q l3_device && echo eth0 ;;
+	*'route[0].nexthop'*) printf '%s' "$input" | grep -q nexthop && echo 198.51.100.1 ;;
+	*) exit 0 ;;
+esac

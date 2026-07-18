@@ -1,0 +1,27 @@
+<!doctype html>
+<html lang="en">
+<head>
+	<meta charset="utf-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<title>NordVPN Manager UI harness</title>
+	<style>
+		:root { color-scheme: light dark; }
+		body { margin: 0; padding: 28px; background: Canvas; color: CanvasText; font-family: sans-serif; }
+		main { max-width: 1240px; margin: 0 auto; }
+		.btn, .cbi-button { min-height: 34px; padding: 6px 12px; border: 1px solid rgba(127,127,127,.4); border-radius: 5px; background: rgba(127,127,127,.1); color: inherit; }
+		.cbi-button-positive { background: #147a5b; border-color: #147a5b; color: #fff; }
+		.cbi-button-negative { border-color: #b42f4a; color: #b42f4a; }
+		.cbi-input-select, .cbi-input-text, .cbi-input-password { min-height: 34px; padding: 5px 8px; border: 1px solid rgba(127,127,127,.4); border-radius: 5px; background: Canvas; color: CanvasText; }
+		#modal { position: fixed; inset: 0; z-index: 20; display: none; place-items: center; padding: 20px; background: rgba(0,0,0,.48); }
+		#modal.open { display: grid; }
+		#modal-panel { width: min(520px, 100%); padding: 22px; border: 1px solid rgba(127,127,127,.4); border-radius: 6px; background: Canvas; color: CanvasText; }
+		#modal-panel h3 { margin-top: 0; }
+		.notice { position: fixed; right: 18px; bottom: 18px; z-index: 30; padding: 10px 14px; border-radius: 5px; background: #147a5b; color: #fff; }
+	</style>
+</head>
+<body>
+	<main id="app"></main>
+	<div id="modal"><div id="modal-panel"></div></div>
+	<script src="harness.js"></script>
+</body>
+</html>
