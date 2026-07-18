@@ -26,6 +26,43 @@ case "$SDK/" in
 		;;
 esac
 
+TARGET_HINT=''
+for path in "$SDK"/build_dir/target-*/linux-*_*; do
+	[ -d "$path" ] || continue
+	[ -z "$TARGET_HINT" ] || {
+		echo 'The SDK contains more than one kernel target' >&2
+		exit 1
+	}
+	TARGET_HINT="$path"
+done
+
+[ -n "$TARGET_HINT" ] || {
+	echo 'Unable to derive the target from the SDK kernel build directory' >&2
+	exit 1
+}
+
+TARGET_PAIR="${TARGET_HINT##*/linux-}"
+case "$TARGET_PAIR" in
+	*_*) ;;
+	*) echo 'Unable to split the SDK target and subtarget' >&2; exit 1 ;;
+esac
+TARGET_BOARD="${TARGET_PAIR%%_*}"
+TARGET_SUBTARGET="${TARGET_PAIR#*_}"
+
+case "$TARGET_BOARD" in
+	''|*[!A-Za-z0-9_-]*)
+		echo 'Unable to derive a safe target from the SDK' >&2
+		exit 1
+		;;
+esac
+
+case "$TARGET_SUBTARGET" in
+	''|*[!A-Za-z0-9_-]*)
+		echo 'Unable to derive a safe subtarget from the SDK' >&2
+		exit 1
+		;;
+esac
+
 if [ "${NVM_UPDATE_FEEDS:-1}" = '1' ]; then
 	(
 		cd "$SDK"
@@ -66,26 +103,8 @@ for item in Makefile LICENSE README.md htdocs po root; do
 done
 : > "$STAGE_MARKER"
 
-# Release SDKs expose the complete package catalogue. Reset the controllable
-# global package selectors before compiling this package. The SDK's hidden
-# BUILDBOT setting may still retain its target multiprofile metadata.
-TARGET_BOARD="$(sed -n 's/^CONFIG_TARGET_BOARD="\([^"]*\)"$/\1/p' "$SDK/.config" | head -n 1)"
-TARGET_SUBTARGET="$(sed -n 's/^CONFIG_TARGET_SUBTARGET="\([^"]*\)"$/\1/p' "$SDK/.config" | head -n 1)"
-
-case "$TARGET_BOARD" in
-	''|*[!A-Za-z0-9_-]*)
-		echo 'Unable to derive a safe target and subtarget from the SDK' >&2
-		exit 1
-		;;
-esac
-
-case "$TARGET_SUBTARGET" in
-	''|*[!A-Za-z0-9_-]*)
-		echo 'Unable to derive a safe target and subtarget from the SDK' >&2
-		exit 1
-		;;
-esac
-
+# Release SDKs expose the complete package catalogue and may omit .config.
+# Reset the controllable global selectors before compiling this package.
 cat > "$SDK/.config" <<EOF
 CONFIG_TARGET_${TARGET_BOARD}=y
 CONFIG_TARGET_${TARGET_BOARD}_${TARGET_SUBTARGET}=y
@@ -110,8 +129,20 @@ EOF
 			exit 1
 		fi
 	done
-	make package/luci-app-nordvpn-manager/clean CONFIG_AUTOREMOVE=
-	make package/luci-app-nordvpn-manager/compile -j"${NVM_JOBS:-2}" V="${NVM_VERBOSE:-}" CONFIG_AUTOREMOVE=
+	# This architecture-independent LuCI package only needs LuCI's host tools.
+	# Runtime dependencies remain in the APK metadata, while NO_DEPS avoids
+	# rebuilding every kernel module preselected by release SDKs.
+	make package/luci-base/host/compile \
+		-j"${NVM_JOBS:-2}" \
+		V="${NVM_VERBOSE:-}" \
+		CONFIG_AUTOREMOVE=y \
+		NO_DEPS=1
+	make package/luci-app-nordvpn-manager/clean NO_DEPS=1
+	make package/luci-app-nordvpn-manager/compile \
+		-j"${NVM_JOBS:-2}" \
+		V="${NVM_VERBOSE:-}" \
+		CONFIG_AUTOREMOVE=y \
+		NO_DEPS=1
 )
 
 find "$SDK/bin" -type f \( \
