@@ -1,19 +1,19 @@
 .nvm-dashboard {
-	--nvm-line: rgba(108, 117, 125, 0.28);
+	--nvm-line: var(--cpd-surface1, rgba(108, 117, 125, 0.28));
 	--nvm-surface: rgba(108, 117, 125, 0.075);
 	--nvm-surface-strong: rgba(108, 117, 125, 0.13);
-	--nvm-muted: #5e6872;
-	--nvm-good: #147a5b;
+	--nvm-muted: var(--cpd-text-muted, #5e6872);
+	--nvm-good: var(--cpd-green, #147a5b);
 	--nvm-good-soft: rgba(20, 122, 91, 0.13);
-	--nvm-dns: #117c98;
+	--nvm-dns: var(--cpd-teal, #117c98);
 	--nvm-dns-soft: rgba(17, 124, 152, 0.13);
-	--nvm-warning: #a35e00;
+	--nvm-warning: var(--cpd-yellow, #a35e00);
 	--nvm-warning-soft: rgba(163, 94, 0, 0.14);
-	--nvm-bad: #b42f4a;
+	--nvm-bad: var(--cpd-red, #b42f4a);
 	--nvm-bad-soft: rgba(180, 47, 74, 0.12);
 	max-width: 1180px;
 	margin: 0 auto;
-	font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+	font-family: var(--cpd-font-sans, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif);
 	font-size: 14px;
 	line-height: 1.45;
 	letter-spacing: 0;
@@ -32,11 +32,11 @@
 	margin-top: 0;
 }
 
-.nvm-dashboard h2 {
+.nvm-dashboard > .nvm-page-title {
 	margin-bottom: 0;
-	font-size: 24px;
-	font-weight: 650;
-	line-height: 1.2;
+	font-size: var(--cpd-type-title-size, 22px);
+	font-weight: var(--cpd-weight-semibold, 600);
+	line-height: var(--cpd-type-title-line, 26px);
 }
 
 .nvm-dashboard h3 {
@@ -46,12 +46,12 @@
 	line-height: 1.3;
 }
 
-.nvm-page-head {
+.nvm-page-meta {
 	display: flex;
-	align-items: flex-end;
+	align-items: center;
 	justify-content: space-between;
-	gap: 20px;
-	padding: 4px 0 18px;
+	gap: 8px 20px;
+	padding: 8px 0 18px;
 	border-bottom: 1px solid var(--nvm-line);
 }
 
@@ -146,7 +146,6 @@
 	color: var(--nvm-muted);
 }
 
-.nvm-connection-actions,
 .nvm-account-actions,
 .nvm-catalog-actions > div,
 .nvm-section-head > div:last-child,
@@ -157,6 +156,25 @@
 	justify-content: flex-end;
 	gap: 8px;
 	flex-wrap: wrap;
+}
+
+.nvm-connection-control {
+	display: flex;
+	align-items: center;
+	justify-content: flex-end;
+	gap: 12px;
+	min-width: 190px;
+}
+
+.nvm-connection-copy {
+	display: grid;
+	gap: 2px;
+	text-align: right;
+}
+
+.nvm-connection-copy span {
+	color: var(--nvm-muted);
+	font-size: 12px;
 }
 
 .nvm-route {
@@ -548,6 +566,14 @@
 	}
 }
 
+:root[data-theme="dark"] .nvm-dashboard {
+	--nvm-muted: var(--cpd-text-muted, #aeb7c1);
+	--nvm-good: var(--cpd-green, #63c99b);
+	--nvm-dns: var(--cpd-teal, #63bfd3);
+	--nvm-warning: var(--cpd-yellow, #e2a957);
+	--nvm-bad: var(--cpd-red, #ee8095);
+}
+
 @media (prefers-reduced-motion: reduce) {
 	.nvm-switch-track,
 	.nvm-switch-knob {
@@ -593,7 +619,6 @@
 		font-size: 13px;
 	}
 
-	.nvm-page-head,
 	.nvm-status-band,
 	.nvm-account-band,
 	.nvm-section-head,
@@ -604,6 +629,11 @@
 
 	.nvm-unofficial {
 		white-space: normal;
+	}
+
+	.nvm-page-meta {
+		align-items: flex-start;
+		flex-wrap: wrap;
 	}
 
 	.nvm-status-band {
@@ -623,17 +653,25 @@
 		grid-column: 1;
 	}
 
-	.nvm-connection-actions,
 	.nvm-account-actions,
 	.nvm-catalog-actions > div,
 	.nvm-section-head > div:last-child {
 		justify-content: stretch;
 	}
 
-	.nvm-connection-actions .btn,
 	.nvm-account-actions .btn,
 	.nvm-catalog-actions .btn {
 		flex: 1 1 auto;
+	}
+
+	.nvm-connection-control {
+		justify-content: space-between;
+		width: 100%;
+		min-width: 0;
+	}
+
+	.nvm-connection-copy {
+		text-align: left;
 	}
 
 	.nvm-route,

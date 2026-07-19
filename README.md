@@ -72,7 +72,7 @@ resolve the declared dependencies:
 
 ```sh
 apk add --allow-untrusted \
-  /tmp/luci-app-nordvpn-manager-0.1.0-r8.apk \
+  /tmp/luci-app-nordvpn-manager-0.1.0-r9.apk \
   /tmp/luci-i18n-nordvpn-manager-es-*.apk
 ```
 

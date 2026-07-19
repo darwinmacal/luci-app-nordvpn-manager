@@ -106,6 +106,20 @@ const servers = [
 
 function clone(value) { return JSON.parse(JSON.stringify(value)); }
 
+function activateServer(serverId) {
+	const selected = servers.find(function(server) { return Number(server.id) == Number(serverId); }) || servers[0];
+	managerState.state.selected_server_id = Number(selected.id);
+	managerState.state.selected_hostname = selected.hostname;
+	managerState.state.desired_enabled = true;
+	managerState.runtime.connected = true;
+	managerState.runtime.pbr_running = true;
+	managerState.runtime.dns_running = true;
+	managerState.connection_state = 'connected';
+	managerState.server = Object.assign({ groups: [ 11 ] }, clone(selected));
+	managerState.peer.endpoint = selected.station + ':51820';
+	return clone(managerState);
+}
+
 const rpc = {
 	declare: function(definition) {
 		return function() {
@@ -120,12 +134,9 @@ const rpc = {
 				managerState.state.killswitch_enabled = args[0];
 				managerState.runtime.fallback = args[0] ? 'blocked' : 'wan';
 				return Promise.resolve(clone(managerState));
-			case 'connect_server':
-				managerState.state.selected_server_id = Number(args[0]);
-				managerState.state.desired_enabled = true;
-				managerState.connection_state = 'connected';
-				return Promise.resolve(clone(managerState));
-			case 'connect_recommended': case 'reconnect': return Promise.resolve(clone(managerState));
+			case 'connect_server': return Promise.resolve(activateServer(args[0]));
+			case 'connect_recommended': return Promise.resolve(activateServer(servers[0].id));
+			case 'reconnect': return Promise.resolve(activateServer(managerState.state.selected_server_id));
 			case 'disconnect':
 				managerState.state.desired_enabled = false;
 				managerState.runtime.connected = false;
@@ -168,6 +179,6 @@ fetch('/htdocs/luci-static/resources/view/nordvpn-manager/overview.js')
 		const component = factory(dom, poll, rpc, ui, view, L, E, _);
 		window.nvmComponent = component;
 		return component.load().then(function(data) {
-			document.getElementById('app').appendChild(component.render(data));
+			document.getElementById('maincontent').appendChild(component.render(data));
 		});
 	});

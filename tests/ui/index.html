@@ -5,9 +5,37 @@
 	<meta name="viewport" content="width=device-width, initial-scale=1">
 	<title>NordVPN Manager UI harness</title>
 	<style>
-		:root { color-scheme: light dark; }
-		body { margin: 0; padding: 28px; background: Canvas; color: CanvasText; font-family: sans-serif; }
+		:root {
+			color-scheme: light;
+			--cpd-surface1: #bcc0cc;
+			--cpd-text: #4c4f69;
+			--cpd-text-muted: #5c5f77;
+			--cpd-green: #2f7d32;
+			--cpd-teal: #179299;
+			--cpd-yellow: #8a5d00;
+			--cpd-red: #d20f39;
+			--cpd-section-accent: #7287fd;
+			--cpd-font-sans: -apple-system, BlinkMacSystemFont, "Inter", "Segoe UI", sans-serif;
+			--cpd-type-title-size: 22px;
+			--cpd-type-title-line: 26px;
+			--cpd-weight-semibold: 600;
+		}
+		:root[data-theme="dark"] {
+			color-scheme: dark;
+			--cpd-surface1: #45475a;
+			--cpd-text: #cdd6f4;
+			--cpd-text-muted: #a6adc8;
+			--cpd-green: #a6e3a1;
+			--cpd-teal: #94e2d5;
+			--cpd-yellow: #f9e2af;
+			--cpd-red: #f38ba8;
+			--cpd-section-accent: #b4befe;
+		}
+		body { margin: 0; padding: 28px; background: Canvas; color: var(--cpd-text); font-family: var(--cpd-font-sans); }
 		main { max-width: 1240px; margin: 0 auto; }
+		h1, h2, h3 { color: var(--cpd-text); font-family: var(--cpd-font-sans); font-weight: var(--cpd-weight-semibold); }
+		h2 { font-size: var(--cpd-type-title-size); line-height: var(--cpd-type-title-line); }
+		#maincontent > .cbi-map > h2 { border-left: 3px solid var(--cpd-section-accent); padding-left: 12px; }
 		.btn, .cbi-button { min-height: 34px; padding: 6px 12px; border: 1px solid rgba(127,127,127,.4); border-radius: 5px; background: rgba(127,127,127,.1); color: inherit; }
 		.cbi-button-positive { background: #147a5b; border-color: #147a5b; color: #fff; }
 		.cbi-button-negative { border-color: #b42f4a; color: #b42f4a; }
@@ -18,9 +46,10 @@
 		#modal-panel h3 { margin-top: 0; }
 		.notice { position: fixed; right: 18px; bottom: 18px; z-index: 30; padding: 10px 14px; border-radius: 5px; background: #147a5b; color: #fff; }
 	</style>
+	<script>document.documentElement.dataset.theme = matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';</script>
 </head>
 <body>
-	<main id="app"></main>
+	<main id="maincontent"></main>
 	<div id="modal"><div id="modal-panel"></div></div>
 	<script src="harness.js"></script>
 </body>

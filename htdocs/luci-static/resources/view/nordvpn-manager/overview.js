@@ -146,7 +146,7 @@ return view.extend({
 		document.head.appendChild(E('link', {
 			'id': 'nordvpn-manager-styles',
 			'rel': 'stylesheet',
-			'href': L.resource('view/nordvpn-manager/overview.css') + '?v=0.1.0'
+			'href': L.resource('view/nordvpn-manager/overview.css') + '?v=0.1.0-r9'
 		}));
 	},
 
@@ -242,6 +242,27 @@ return view.extend({
 		);
 	},
 
+	selectServer: function(id) {
+		if (this.busy)
+			return;
+		const state = (this.status && this.status.state) || {};
+		const activeId = Number(state.selected_server_id || 0);
+		if (state.desired_enabled && id != activeId) {
+			const wait = this.cooldownWait();
+			if (wait > 0)
+				return this.notify(_('Next server change in %s').format(formatDuration(wait)), 'warning');
+			if (!(this.account && this.account.linked))
+				return this.notify(_('Link your NordVPN account first'), 'warning');
+			this.selectedServer = id;
+			this.renderServers();
+			this.updateControls();
+			return this.runAction('connect', callConnectServer(id), _('VPN connected'));
+		}
+		this.selectedServer = id;
+		this.renderServers();
+		this.updateControls();
+	},
+
 	connectFastest: function() {
 		const filter = this.dynamicFilter();
 		return this.runAction('connect', callConnectRecommended(
@@ -271,6 +292,32 @@ return view.extend({
 				}, [ _('Disconnect') ])
 			])
 		]);
+	},
+
+	toggleConnection: function(event) {
+		const state = (this.status && this.status.state) || {};
+		if (this.busy) {
+			event.target.checked = !!state.desired_enabled;
+			return;
+		}
+		if (!event.target.checked) {
+			event.target.checked = true;
+			return this.confirmDisconnect();
+		}
+		if (!(this.account && this.account.linked)) {
+			event.target.checked = false;
+			return this.notify(_('Link your NordVPN account first'), 'warning');
+		}
+		if (!this.selectedServer) {
+			event.target.checked = false;
+			return this.notify(_('Select a server first'), 'warning');
+		}
+		const wait = this.cooldownWait();
+		if (wait > 0) {
+			event.target.checked = false;
+			return this.notify(_('Next server change in %s').format(formatDuration(wait)), 'warning');
+		}
+		return this.connectSelected();
 	},
 
 	toggleKillswitch: function(event) {
@@ -454,11 +501,7 @@ return view.extend({
 				E('button', {
 					'class': 'nvm-server-select',
 					'disabled': this.busy ? 'disabled' : null,
-					'click': L.bind(function() {
-						this.selectedServer = id;
-						this.renderServers();
-						this.updateControls();
-					}, this)
+					'click': L.bind(function() { return this.selectServer(id); }, this)
 				}, [
 					E('span', { 'class': 'nvm-server-name' }, [ server.hostname ]),
 					E('span', { 'class': 'nvm-server-location' }, [
@@ -527,6 +570,8 @@ return view.extend({
 		this.nodes.stateBadge.textContent = this.busy ? _('Working') : label;
 		this.nodes.stateTitle.textContent = label;
 		this.nodes.stateDetail.textContent = server.hostname || _('No server selected');
+		this.nodes.connectionInput.checked = !!state.desired_enabled;
+		this.nodes.connectionValue.textContent = state.desired_enabled ? _('Enabled') : _('Disabled');
 		this.nodes.killInput.checked = !!state.killswitch_enabled;
 		this.nodes.killValue.textContent = state.killswitch_enabled ? _('Enabled') : _('Disabled');
 		this.nodes.accountValue.textContent = this.account.linked ? _('Linked') : _('Not linked');
@@ -572,14 +617,14 @@ return view.extend({
 	},
 
 	updateControls: function() {
-		if (!this.nodes || !this.nodes.connect)
+		if (!this.nodes || !this.nodes.connectionInput)
 			return;
 		const state = (this.status && this.status.state) || {};
 		const linked = !!(this.account && this.account.linked);
 		const wait = this.cooldownWait();
-		this.nodes.connect.disabled = this.busy || this.catalogBusy || !linked || !this.selectedServer || wait > 0;
+		this.nodes.connectionInput.disabled = this.busy || (!state.desired_enabled &&
+			(this.catalogBusy || !linked || !this.selectedServer || wait > 0));
 		this.nodes.fastest.disabled = this.busy || this.catalogBusy || !linked || !this.selectedGroup || wait > 0;
-		this.nodes.disconnect.disabled = this.busy || !state.desired_enabled;
 		this.nodes.refreshServers.disabled = this.busy || this.catalogBusy;
 		this.nodes.killInput.disabled = this.busy || !state.configured;
 		this.nodes.link.disabled = this.busy;
@@ -590,7 +635,6 @@ return view.extend({
 		this.nodes.country.disabled = this.busy || this.catalogBusy;
 		this.nodes.city.disabled = this.busy || this.catalogBusy || !this.selectedCountry;
 		this.nodes.category.disabled = this.busy || this.catalogBusy;
-		this.nodes.connect.textContent = Number(state.selected_server_id) == this.selectedServer ? _('Reconnect') : _('Connect');
 	},
 
 	networkOptions: function(selected) {
@@ -744,7 +788,13 @@ return view.extend({
 	},
 
 	dashboardContent: function() {
+		const connectionInput = E('input', {
+			'id': 'nvm-connection-toggle',
+			'type': 'checkbox', 'role': 'switch', 'aria-label': _('VPN connection'),
+			'change': L.bind(this.toggleConnection, this)
+		});
 		const killInput = E('input', {
+			'id': 'nvm-kill-toggle',
 			'type': 'checkbox', 'role': 'switch', 'aria-label': _('Kill switch'),
 			'change': L.bind(this.toggleKillswitch, this)
 		});
@@ -782,9 +832,17 @@ return view.extend({
 					E('h3', { 'id': 'nvm-state-title' }, [ _('Checking') ]),
 					E('span', { 'id': 'nvm-state-detail' }, [ '-' ])
 				]),
-				E('div', { 'class': 'nvm-connection-actions' }, [
-					E('button', { 'class': 'btn cbi-button cbi-button-positive', 'id': 'nvm-connect', 'click': ui.createHandlerFn(this, this.connectSelected) }, [ _('Connect') ]),
-					E('button', { 'class': 'btn cbi-button cbi-button-negative', 'id': 'nvm-disconnect', 'click': ui.createHandlerFn(this, this.confirmDisconnect) }, [ _('Disconnect') ])
+				E('div', { 'class': 'nvm-connection-control' }, [
+					E('div', { 'class': 'nvm-connection-copy' }, [
+						E('strong', [ _('VPN connection') ]),
+						E('span', { 'id': 'nvm-connection-value' }, [ _('Enabled') ])
+					]),
+					E('label', { 'class': 'nvm-switch', 'for': 'nvm-connection-toggle' }, [
+						connectionInput,
+						E('span', { 'class': 'nvm-switch-track', 'aria-hidden': 'true' }, [
+							E('span', { 'class': 'nvm-switch-knob' })
+						])
+					])
 				])
 			]),
 
@@ -803,7 +861,7 @@ return view.extend({
 					E('strong', [ _('Kill switch') ]),
 					E('span', { 'id': 'nvm-kill-value' }, [ _('Enabled') ])
 				]),
-				E('label', { 'class': 'nvm-switch' }, [
+				E('label', { 'class': 'nvm-switch', 'for': 'nvm-kill-toggle' }, [
 					killInput,
 					E('span', { 'class': 'nvm-switch-track', 'aria-hidden': 'true' }, [
 						E('span', { 'class': 'nvm-switch-knob' })
@@ -879,7 +937,8 @@ return view.extend({
 		const byId = L.bind(function(id) { return this.root.querySelector('#' + id); }, this);
 		Object.assign(this.nodes, {
 			stateBadge: byId('nvm-state-badge'), stateTitle: byId('nvm-state-title'), stateDetail: byId('nvm-state-detail'),
-			connect: byId('nvm-connect'), disconnect: byId('nvm-disconnect'), killInput: this.root.querySelector('.nvm-switch input'),
+			connectionInput: byId('nvm-connection-toggle'), connectionValue: byId('nvm-connection-value'),
+			killInput: byId('nvm-kill-toggle'),
 			killValue: byId('nvm-kill-value'), accountValue: byId('nvm-account-value'), accountDetail: byId('nvm-account-detail'),
 			link: byId('nvm-link'), refreshKey: byId('nvm-refresh-key'), unlink: byId('nvm-unlink'),
 			serverMetric: byId('nvm-server'), locationMetric: byId('nvm-location'), endpointMetric: byId('nvm-endpoint'),
@@ -915,8 +974,9 @@ return view.extend({
 		this.nodes = {};
 
 		this.root = E('div', { 'class': 'cbi-map nvm-dashboard', 'aria-busy': 'false' }, [
-			E('header', { 'class': 'nvm-page-head' }, [
-				E('div', [ E('span', { 'class': 'nvm-eyebrow' }, [ _('Services / VPN') ]), E('h2', [ _('NordVPN Manager') ]) ]),
+			E('h2', { 'class': 'nvm-page-title' }, [ _('NordVPN Manager') ]),
+			E('div', { 'class': 'nvm-page-meta' }, [
+				E('span', { 'class': 'nvm-eyebrow' }, [ _('Services / VPN') ]),
 				E('span', { 'class': 'nvm-unofficial' }, [ _('Unofficial integration') ])
 			]),
 			E('div', { 'id': 'nvm-content' })

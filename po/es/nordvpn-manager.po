@@ -57,6 +57,9 @@ msgstr "No se pudieron cargar los servidores de NordVPN"
 msgid "Select a server first"
 msgstr "Selecciona primero un servidor"
 
+msgid "Link your NordVPN account first"
+msgstr "Vincula primero tu cuenta de NordVPN"
+
 msgid "VPN reconnected"
 msgstr "VPN reconectada"
 
@@ -314,6 +317,9 @@ msgstr "Kill switch"
 
 msgid "Connection status"
 msgstr "Estado de conexión"
+
+msgid "VPN connection"
+msgstr "Conexión VPN"
 
 msgid "Checking"
 msgstr "Comprobando"

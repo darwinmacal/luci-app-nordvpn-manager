@@ -89,30 +89,54 @@ async function exercise(page, language) {
 
   const expectedState = language == 'es' ? 'Conectado' : 'Connected';
   assert.equal((await page.locator('#nvm-state-title').textContent()).trim(), expectedState);
-  assert.equal(await page.locator('.nvm-switch input[role="switch"]').count(), 1);
+  assert.equal(await page.locator('.nvm-switch input[role="switch"]').count(), 2);
+  assert.equal(await page.locator('#nvm-connect, #nvm-disconnect').count(), 0);
   assert.equal(await page.locator('.nvm-server-row').count() > 0, true);
 
-  await page.locator('.nvm-switch input').click();
+  const pageTitle = page.locator('.nvm-dashboard > h2.nvm-page-title');
+  assert.equal(await pageTitle.count(), 1);
+  const titleStyle = await pageTitle.evaluate((node) => {
+    const style = getComputedStyle(node);
+    return { borderLeftWidth: style.borderLeftWidth, fontSize: style.fontSize, lineHeight: style.lineHeight };
+  });
+  assert.deepEqual(titleStyle, { borderLeftWidth: '3px', fontSize: '22px', lineHeight: '26px' });
+
+  await page.locator('#nvm-kill-toggle').click();
   await page.locator('#modal.open').waitFor();
   const disableLabel = language == 'es' ? 'Desactivar' : 'Disable';
   await page.getByRole('button', { name: disableLabel, exact: true }).click();
-  await page.waitForFunction(() => !document.querySelector('.nvm-switch input').checked);
-  await page.locator('.nvm-switch input').click();
-  await page.waitForFunction(() => document.querySelector('.nvm-switch input').checked);
+  await page.waitForFunction(() => !document.querySelector('#nvm-kill-toggle').checked);
+  await page.locator('#nvm-kill-toggle').click();
+  await page.waitForFunction(() => document.querySelector('#nvm-kill-toggle').checked);
 
   const rows = page.locator('.nvm-server-row');
   await rows.nth(1).click();
   await page.waitForFunction(() => document.querySelectorAll('.nvm-server-row')[1].classList.contains('is-selected'));
+  await page.waitForFunction(() => document.querySelector('#nvm-connection-toggle').checked);
 
   const disconnectLabel = language == 'es' ? 'Desconectar' : 'Disconnect';
-  await page.locator('#nvm-disconnect').click();
+  const cancelLabel = language == 'es' ? 'Cancelar' : 'Cancel';
+  await page.locator('#nvm-connection-toggle').click();
+  await page.locator('#modal.open').waitFor();
+  assert.equal(await page.locator('#nvm-connection-toggle').isChecked(), true);
+  await page.locator('#modal-panel').getByRole('button', { name: cancelLabel, exact: true }).click();
+  await page.locator('#modal.open').waitFor({ state: 'hidden' });
+  assert.equal(await page.locator('#nvm-connection-toggle').isChecked(), true);
+
+  await page.locator('#nvm-connection-toggle').click();
   await page.locator('#modal.open').waitFor();
   await page.locator('#modal-panel').getByRole('button', { name: disconnectLabel, exact: true }).click();
-  await page.waitForFunction(() => !document.querySelector('#nvm-settings').disabled);
+  await page.waitForFunction(() => !document.querySelector('#nvm-connection-toggle').checked && !document.querySelector('#nvm-settings').disabled);
 
   const editLabel = language == 'es' ? 'Editar' : 'Edit';
   await page.getByRole('button', { name: editLabel, exact: true }).click();
   await page.locator('.nvm-settings-form').waitFor();
+
+  await page.locator('#nvm-connection-toggle').click();
+  await page.waitForFunction(() => document.querySelector('#nvm-connection-toggle').checked &&
+    document.querySelector('#nvm-settings').disabled &&
+    document.querySelector('.nvm-dashboard').getAttribute('aria-busy') == 'false');
+  await page.locator('.notice').last().waitFor({ state: 'detached' });
 
   const report = await layoutReport(page);
   assert.equal(report.horizontalOverflow, false, JSON.stringify(report));
